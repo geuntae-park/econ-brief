@@ -1,0 +1,22 @@
+name: Daily Econ Brief
+
+on:
+  schedule:
+    # UTC 기준 22:00 = 한국시간 07:00
+    - cron: '0 22 * * 0-4'
+  workflow_dispatch:   # 수동 실행 버튼
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python brief.py
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
