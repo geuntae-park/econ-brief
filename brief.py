@@ -2,57 +2,56 @@ import os
 import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from anthropic import Anthropic
+from google import genai
+from google.genai import types
 
-# 환경변수에서 키 읽기
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 
-client = Anthropic(api_key=ANTHROPIC_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y년 %m월 %d일")
 
-PROMPT = f"""오늘은 {today}입니다. 웹 검색을 사용해 최근 24시간 미국 경제 관련 정보를 조사하고,
-아래 형식으로 한국어 브리핑을 작성하세요.
+PROMPT = f"""오늘은 {today}입니다. 구글 검색으로 최근 24시간 미국 경제 관련 정보를 조사해서
+아래 형식 그대로 한국어 브리핑을 작성하세요.
 
 📊 미국 경제 브리핑 | {today}
 
 ■ 주요 지표 발표
-- (어제 발표된 경제지표와 수치, 예상치 대비 결과)
+- (전일 발표된 경제지표와 실제 수치, 예상치 대비 결과)
 
 ■ 시장 동향
-- (S&P500, 나스닥, 다우 등락률 / 10년물 금리 / 달러인덱스)
+- S&P500 / 나스닥 / 다우 등락률
+- 10년물 국채금리, 달러인덱스
 
 ■ 주요 이슈
-- (연준 발언, 정책 이슈, 주목할 기업 뉴스 등 2~3개)
+- (연준 발언, 정책, 주목할 기업 뉴스 2~3개)
 
 ■ 오늘 주목할 일정
 - (오늘 예정된 지표 발표나 이벤트)
 
-규칙:
+작성 규칙:
 - 각 항목은 한 줄로 간결하게
-- 수치는 반드시 검색으로 확인한 실제 값만 사용
+- 수치는 반드시 검색으로 확인한 실제 값만 사용, 추측 금지
 - 확인 안 되는 항목은 "발표 없음" 또는 생략
 - 전체 1500자 이내
-- 마크다운 기호(**, ##) 사용 금지, 위 형식 그대로
+- 마크다운 기호(**, ##, *) 절대 사용 금지
+- 위 형식 그대로 출력, 앞뒤 설명 없이 브리핑만
 """
 
+
 def get_briefing():
-    resp = client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=2000,
-        tools=[{
-            "type": "web_search_20250305",
-            "name": "web_search",
-            "max_uses": 8
-        }],
-        messages=[{"role": "user", "content": PROMPT}]
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=PROMPT,
+        config=types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            temperature=0.3,
+        ),
     )
-    return "".join(
-        block.text for block in resp.content
-        if block.type == "text"
-    ).strip()
+    return (resp.text or "").strip()
+
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -63,6 +62,7 @@ def send_telegram(text):
     }, timeout=30)
     r.raise_for_status()
     return r.json()
+
 
 if __name__ == "__main__":
     try:
