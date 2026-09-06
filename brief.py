@@ -43,7 +43,7 @@ PROMPT = f"""오늘은 {today}입니다. 구글 검색으로 최근 24시간 미
 
 def get_briefing():
     resp = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.6-flash",
         contents=PROMPT,
         config=types.GenerateContentConfig(
             tools=[types.Tool(google_search=types.GoogleSearch())],
