@@ -1,5 +1,6 @@
 import os
 import re
+import html
 import time
 import calendar
 import requests
@@ -98,12 +99,13 @@ YAHOO_TICKERS = {
 }
 
 MY_TICKERS = {
-    "QQQ":  "QQQ",
+    "QLD":  "QLD",
     "TQQQ": "TQQQ",
-    "USD":  "USD(반도체2x)",
+    "USD":  "USD",
     "SOXL": "SOXL",
-    "DGRO": "DGRO",
     "UPRO": "UPRO",
+    "DGRO": "DGRO",
+    "SPCX": "SPCX",
 }
 
 
@@ -119,7 +121,8 @@ def yahoo_quote(ticker):
     return price, prev
 
 
-def build_quotes(ticker_map):
+def build_quotes(ticker_map, align=False):
+    """align=True면 고정폭 코드블록용으로 자릿수를 맞춘다."""
     lines = []
     for tk, label in ticker_map.items():
         try:
@@ -128,7 +131,10 @@ def build_quotes(ticker_map):
                 lines.append(f"⚠️ {label}  조회실패")
                 continue
             chg = (price / prev - 1) * 100
-            lines.append(f"{arrow(chg)} {label}  {price:,.2f}  {chg:+.2f}%")
+            if align:
+                lines.append(f"{arrow(chg)} {label:<5}{price:>8,.2f} {chg:>+6.1f}%")
+            else:
+                lines.append(f"{arrow(chg)} {label}  {price:,.2f}  {chg:+.2f}%")
         except Exception as e:
             print(f"Yahoo 실패 {tk}: {e}")
             lines.append(f"⚠️ {label}  조회실패")
@@ -367,21 +373,59 @@ def gemini_summary(raw_text):
 
 
 # ==================== 텔레그램 ====================
-def send_telegram(text):
+def send_telegram(text, parse_mode=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    r = requests.post(url, json={
+    payload = {
         "chat_id": CHANNEL_ID,
         "text": text,
-        "disable_web_page_preview": True
-    }, timeout=30)
+        "disable_web_page_preview": True,
+    }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    r = requests.post(url, json=payload, timeout=30)
     r.raise_for_status()
     return r.json()
 
 
 # ==================== 조립 ====================
+def compose(as_html, summary, market, holdings, indicators, fed, news, kr_news):
+    """같은 내용을 평문(Gemini 입력용)과 HTML(발송용) 두 벌로 만든다."""
+    # 따옴표까지 바꾸면 &#x27; 이 그대로 노출될 수 있어 태그 문자만 이스케이프한다
+    esc = (lambda t: html.escape(t, quote=False)) if as_html else (lambda t: t)
+    parts = [f"📊 미국 경제 브리핑 | {esc(today)}"]
+
+    if summary:
+        parts.append("📝 요약\n" + esc(summary))
+
+    parts.append("📈 시장 동향\n" +
+                 ("\n".join(esc(l) for l in market) if market else "조회 실패"))
+
+    if holdings:
+        block = "\n".join(esc(l) for l in holdings)
+        # 고정폭 블록이라야 숫자 자릿수가 세로로 맞는다
+        parts.append("💼 관심 종목\n" + (f"<pre>{block}</pre>" if as_html else block))
+    else:
+        parts.append("💼 관심 종목\n조회 실패")
+
+    parts.append("📉 주요 지표\n" +
+                 ("\n".join(esc(l) for l in indicators) if indicators else "조회 실패"))
+
+    if fed:
+        parts.append("🏛️ 연준·정책 발표\n" +
+                     "\n".join(f"• {esc(t)}" for t in fed))
+
+    parts.append("📰 주요 뉴스\n" +
+                 ("\n".join(f"• {esc(t)}" for t in news) if news else "조회 실패"))
+
+    parts.append("🇰🇷 국내 시장·반도체\n" +
+                 ("\n".join(f"• {esc(t)}" for t in kr_news) if kr_news else "조회 실패"))
+
+    return "\n\n".join(parts)
+
+
 def main():
     market = build_quotes(YAHOO_TICKERS)
-    holdings = build_quotes(MY_TICKERS)
+    holdings = build_quotes(MY_TICKERS, align=True)
     indicators = build_indicators()
     news = build_news()
     fed = build_fed()
@@ -392,36 +436,9 @@ def main():
 
     kr_news = build_kr_news()
 
-    body = f"📊 미국 경제 브리핑 | {today}\n"
-
-    body += "\n📈 시장 동향\n"
-    body += "\n".join(market) if market else "조회 실패"
-
-    body += "\n\n💼 관심 종목\n"
-    body += "\n".join(holdings) if holdings else "조회 실패"
-
-    body += "\n\n📉 주요 지표\n"
-    body += "\n".join(indicators) if indicators else "조회 실패"
-
-    if fed_kr:
-        body += "\n\n🏛️ 연준·정책 발표\n"
-        body += "\n".join(f"• {t}" for t in fed_kr)
-
-    body += "\n\n📰 주요 뉴스\n"
-    body += "\n".join(f"• {t}" for t in news_kr) if news_kr else "조회 실패"
-
-    body += "\n\n🇰🇷 국내 시장·반도체\n"
-    body += "\n".join(f"• {t}" for t in kr_news) if kr_news else "조회 실패"
-
-    summary = gemini_summary(body)
-
-    if summary:
-        final = (f"📊 미국 경제 브리핑 | {today}\n\n"
-                 f"📝 요약\n{summary}\n" + body.split("\n", 1)[1])
-    else:
-        final = body
-
-    send_telegram(final)
+    sections = (market, holdings, indicators, fed_kr, news_kr, kr_news)
+    summary = gemini_summary(compose(False, None, *sections))
+    send_telegram(compose(True, summary, *sections), parse_mode="HTML")
     print("발송 완료")
 
 
