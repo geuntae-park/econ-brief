@@ -1,2 +1,3 @@
-google-genai
 requests
+feedparser
+google-genai

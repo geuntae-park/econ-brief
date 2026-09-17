@@ -1,57 +1,173 @@
 import os
 import requests
-from datetime import datetime
+import feedparser
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from google import genai
-from google.genai import types
 
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+FRED_API_KEY = os.environ["FRED_API_KEY"]
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHANNEL_ID = os.environ["CHANNEL_ID"]
-
-client = genai.Client(api_key=GEMINI_API_KEY)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y년 %m월 %d일")
 
-PROMPT = f"""오늘은 {today}입니다. 구글 검색으로 최근 24시간 미국 경제 관련 정보를 조사해서
-아래 형식 그대로 한국어 브리핑을 작성하세요.
+# ---------- FRED 지표 ----------
+FRED_SERIES = {
+    "CPIAUCSL": ("CPI(전년比)", "yoy"),
+    "UNRATE":   ("실업률", "pct"),
+    "FEDFUNDS": ("연방기금금리", "pct"),
+    "DGS10":    ("10년물 국채", "pct"),
+    "DGS2":     ("2년물 국채", "pct"),
+    "DTWEXBGS": ("달러인덱스", "raw"),
+    "PAYEMS":   ("비농업고용(전월比)", "diff_k"),
+}
 
-📊 미국 경제 브리핑 | {today}
 
-■ 주요 지표 발표
-- (전일 발표된 경제지표와 실제 수치, 예상치 대비 결과)
+def fred_fetch(series_id, limit=14):
+    url = "https://api.stlouisfed.org/fred/series/observations"
+    params = {
+        "series_id": series_id,
+        "api_key": FRED_API_KEY,
+        "file_type": "json",
+        "sort_order": "desc",
+        "limit": limit,
+    }
+    r = requests.get(url, params=params, timeout=20)
+    r.raise_for_status()
+    obs = [o for o in r.json().get("observations", []) if o["value"] != "."]
+    return obs
 
-■ 시장 동향
-- S&P500 / 나스닥 / 다우 등락률
-- 10년물 국채금리, 달러인덱스
 
-■ 주요 이슈
-- (연준 발언, 정책, 주목할 기업 뉴스 2~3개)
+def build_indicators():
+    lines = []
+    for sid, (label, mode) in FRED_SERIES.items():
+        try:
+            obs = fred_fetch(sid)
+            if not obs:
+                continue
+            latest = float(obs[0]["value"])
+            date = obs[0]["date"]
 
-■ 오늘 주목할 일정
-- (오늘 예정된 지표 발표나 이벤트)
+            if mode == "yoy":
+                obs_y = fred_fetch(sid, limit=14)
+                if len(obs_y) >= 13:
+                    prev_year = float(obs_y[12]["value"])
+                    yoy = (latest / prev_year - 1) * 100
+                    lines.append(f"{label}  {yoy:.1f}%  ({date})")
+            elif mode == "pct":
+                prev = float(obs[1]["value"]) if len(obs) > 1 else latest
+                diff = latest - prev
+                sign = "+" if diff >= 0 else ""
+                lines.append(f"{label}  {latest:.2f}%  ({sign}{diff:.2f})")
+            elif mode == "diff_k":
+                prev = float(obs[1]["value"]) if len(obs) > 1 else latest
+                diff = (latest - prev)
+                lines.append(f"{label}  {diff:+,.0f}천명  ({date})")
+            else:
+                prev = float(obs[1]["value"]) if len(obs) > 1 else latest
+                diff = latest - prev
+                sign = "+" if diff >= 0 else ""
+                lines.append(f"{label}  {latest:.2f}  ({sign}{diff:.2f})")
+        except Exception as e:
+            lines.append(f"{label}  조회실패")
+    return lines
 
-작성 규칙:
-- 각 항목은 한 줄로 간결하게
-- 수치는 반드시 검색으로 확인한 실제 값만 사용, 추측 금지
-- 확인 안 되는 항목은 "발표 없음" 또는 생략
-- 전체 1500자 이내
-- 마크다운 기호(**, ##, *) 절대 사용 금지
-- 위 형식 그대로 출력, 앞뒤 설명 없이 브리핑만
+
+# ---------- 시장 지수 (Yahoo Finance) ----------
+YAHOO_TICKERS = {
+    "^GSPC": "S&P500",
+    "^IXIC": "나스닥",
+    "^DJI":  "다우",
+    "^VIX":  "VIX",
+}
+
+
+def yahoo_quote(ticker):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(url, headers=headers, params={"range": "5d", "interval": "1d"}, timeout=20)
+    r.raise_for_status()
+    result = r.json()["chart"]["result"][0]
+    meta = result["meta"]
+    price = meta.get("regularMarketPrice")
+    prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+    return price, prev
+
+
+def build_market():
+    lines = []
+    for tk, label in YAHOO_TICKERS.items():
+        try:
+            price, prev = yahoo_quote(tk)
+            if price is None or not prev:
+                lines.append(f"{label}  조회실패")
+                continue
+            chg = (price / prev - 1) * 100
+            lines.append(f"{label}  {price:,.2f}  {chg:+.2f}%")
+        except Exception:
+            lines.append(f"{label}  조회실패")
+    return lines
+
+
+# ---------- 뉴스 RSS ----------
+RSS_FEEDS = [
+    "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+    "https://www.cnbc.com/id/20910258/device/rss/rss.html",
+    "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
+]
+
+
+def build_news(limit=6):
+    items = []
+    cutoff = datetime.now(ZoneInfo("UTC")) - timedelta(hours=30)
+    for url in RSS_FEEDS:
+        try:
+            feed = feedparser.parse(url)
+            for e in feed.entries[:10]:
+                title = e.get("title", "").strip()
+                if title:
+                    items.append(title)
+        except Exception:
+            continue
+    seen, out = set(), []
+    for t in items:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+        if len(out) >= limit:
+            break
+    return out
+
+
+# ---------- Gemini 요약 (선택) ----------
+def gemini_summary(raw_text):
+    if not GEMINI_API_KEY:
+        return ""
+    try:
+        from google import genai
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        prompt = f"""아래는 오늘자 미국 경제 데이터입니다.
+이 데이터만 근거로 3~4줄의 한국어 브리핑 요약을 작성하세요.
+
+규칙:
+- 데이터에 없는 내용은 절대 추측하지 말 것
+- 마크다운 기호 사용 금지
+- 존댓말, 간결한 문장
+- 시장 분위기와 주목할 점 위주
+
+[데이터]
+{raw_text}
 """
+        resp = client.models.generate_content(
+            model="gemini-flash-latest",
+            contents=prompt,
+        )
+        return (resp.text or "").strip()
+    except Exception:
+        return ""
 
 
-def get_briefing():
-    resp = client.models.generate_content(
-        model="gemini-flash-latest",
-        contents=PROMPT,
-        config=types.GenerateContentConfig(
-            temperature=0.3,
-        ),
-    )
-    return (resp.text or "").strip()
-
-
+# ---------- 텔레그램 ----------
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     r = requests.post(url, json={
@@ -63,13 +179,37 @@ def send_telegram(text):
     return r.json()
 
 
+# ---------- 조립 ----------
+def main():
+    market = build_market()
+    indicators = build_indicators()
+    news = build_news()
+
+    body = f"📊 미국 경제 브리핑 | {today}\n"
+
+    body += "\n■ 시장 동향\n"
+    body += "\n".join(market) if market else "조회 실패"
+
+    body += "\n\n■ 주요 지표\n"
+    body += "\n".join(indicators) if indicators else "조회 실패"
+
+    body += "\n\n■ 주요 뉴스\n"
+    body += "\n".join(f"· {t}" for t in news) if news else "조회 실패"
+
+    summary = gemini_summary(body)
+
+    if summary:
+        final = f"📊 미국 경제 브리핑 | {today}\n\n■ 요약\n{summary}\n" + body.split("\n", 1)[1]
+    else:
+        final = body
+
+    send_telegram(final)
+    print("발송 완료")
+
+
 if __name__ == "__main__":
     try:
-        brief = get_briefing()
-        if not brief:
-            brief = f"⚠️ {today} 브리핑 생성 실패 (내용 없음)"
-        send_telegram(brief)
-        print("발송 완료")
+        main()
     except Exception as e:
         send_telegram(f"⚠️ {today} 브리핑 오류\n{type(e).__name__}: {e}")
         raise
