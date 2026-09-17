@@ -197,6 +197,55 @@ def gemini_summary(raw_text):
 
     return ""
 
+def gemini_translate_news(titles):
+    if not GEMINI_API_KEY or not titles:
+        return titles
+
+    import time
+    try:
+        from google import genai
+        client = genai.Client(api_key=GEMINI_API_KEY)
+    except Exception:
+        return titles
+
+    joined = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
+    prompt = f"""아래 영문 경제 뉴스 헤드라인을 한국어로 번역하세요.
+
+규칙:
+- 번호와 순서를 그대로 유지
+- 의역보다 직역, 단 자연스러운 한국어로
+- 기업명, 인명, 지수명은 원문 그대로 두거나 통용 표기 사용
+- 번역문만 출력, 다른 설명 금지
+
+{joined}
+"""
+
+    for attempt in range(3):
+        try:
+            resp = client.models.generate_content(
+                model="gemini-flash-latest",
+                contents=prompt,
+            )
+            text = (resp.text or "").strip()
+            if not text:
+                continue
+            out = []
+            for line in text.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                if "." in line[:4]:
+                    line = line.split(".", 1)[1].strip()
+                out.append(line)
+            if len(out) == len(titles):
+                return out
+        except Exception as e:
+            print(f"번역 시도 {attempt + 1} 실패: {e}")
+        if attempt < 2:
+            time.sleep(8)
+
+    return titles
+
 # ---------- 텔레그램 ----------
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -214,6 +263,7 @@ def main():
     market = build_market()
     indicators = build_indicators()
     news = build_news()
+    news_kr = gemini_translate_news(news)
 
     body = f"📊 미국 경제 브리핑 | {today}\n"
 
@@ -224,7 +274,7 @@ def main():
     body += "\n".join(indicators) if indicators else "조회 실패"
 
     body += "\n\n■ 주요 뉴스\n"
-    body += "\n".join(f"· {t}" for t in news) if news else "조회 실패"
+    body += "\n".join(f"· {t}" for t in news_kr) if news_kr else "조회 실패"
 
     summary = gemini_summary(body)
 
@@ -235,7 +285,6 @@ def main():
 
     send_telegram(final)
     print("발송 완료")
-
 
 if __name__ == "__main__":
     try:
