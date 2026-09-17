@@ -43,11 +43,12 @@ def fred_fetch(series_id, limit=14):
 
 
 def arrow(diff):
+    # 유니코드에 파란 삼각형이 없어 원으로 쓴다 (빨강=상승, 파랑=하락)
     if diff > 0:
-        return "🔺"
+        return "🔴"
     if diff < 0:
-        return "🔻"
-    return "➖"
+        return "🔵"
+    return "⚪"
 
 
 def build_indicators():
@@ -96,6 +97,17 @@ YAHOO_TICKERS = {
     "^DJI":  "다우",
     "^SOX":  "필라델피아반도체",
     "^VIX":  "VIX",
+}
+
+# 레버리지 ETF는 기초지수가 움직여서 움직인다. 사유를 찾을 때 이 정보를 준다.
+TICKER_BASIS = {
+    "QLD":  "나스닥100 지수 2배 추종 ETF",
+    "TQQQ": "나스닥100 지수 3배 추종 ETF",
+    "USD":  "미국 반도체 지수 2배 추종 ETF",
+    "SOXL": "미국 반도체 지수 3배 추종 ETF",
+    "UPRO": "S&P500 지수 3배 추종 ETF",
+    "DGRO": "미국 배당성장주 ETF",
+    "SPCX": "스페이스X(민간 우주기업) 주식",
 }
 
 MY_TICKERS = {
@@ -382,27 +394,35 @@ def shorten(text, limit=REASON_LIMIT):
 
 
 def gemini_reasons(rows, headlines):
-    """종목별 한 줄 사유를 {라벨: 사유} 로 만든다. 실패하면 빈 dict."""
+    """관심 종목별 한 줄 사유를 {라벨: 사유} 로 만든다. 실패하면 빈 dict."""
     movers = [(label, chg) for label, price, chg in rows if price is not None]
     if not movers or not headlines:
         return {}
 
-    quotes = "\n".join(f"{label} {chg:+.2f}%" for label, chg in movers)
+    lines = []
+    for label, chg in movers:
+        basis = TICKER_BASIS.get(label, "")
+        tag = f" ({basis})" if basis else ""
+        lines.append(f"{label}{tag} {chg:+.2f}%")
+    quotes = "\n".join(lines)
     news = "\n".join(f"- {h}" for h in headlines)
 
-    prompt = f"""아래는 오늘 미국 시장의 지수·종목 등락률과 오늘자 뉴스 헤드라인입니다.
-각 항목이 왜 그렇게 움직였는지 한국어로 아주 짧게 설명하세요.
+    prompt = f"""아래는 오늘 미국 시장에서 내가 보유한 종목의 등락률과 오늘자 뉴스 헤드라인입니다.
+각 종목이 왜 그렇게 움직였는지 한국어로 아주 짧게 설명하세요.
 
 규칙:
 - 출력은 "이름 | 사유" 형식으로 한 줄씩, 입력 순서와 개수를 그대로 유지
-- 사유는 공백 포함 {REASON_LIMIT}자 이내, 명사형으로 끝낼 것 (예: 반도체 급락, 매파 FOMC)
-- 뉴스에 직접 근거가 있을 때만 쓸 것
-- 근거가 없으면 사유를 비워둘 것 ("이름 |" 까지만 출력)
+- 이름은 괄호 없이 티커만 쓸 것 (예: TQQQ | 나스닥 약세)
+- 사유는 공백 포함 {REASON_LIMIT}자 이내, 명사형으로 끝낼 것
+- 괄호 안 설명은 그 종목이 무엇을 추종하는지 알려주는 정보다.
+  기초지수나 해당 섹터에 대한 뉴스가 있으면 그것을 근거로 삼을 것
+  (예: 나스닥 하락 뉴스 → TQQQ 사유로 사용 가능)
+- 기초자산과 무관한 뉴스를 끌어다 쓰지 말 것
+- 관련 뉴스가 없으면 사유를 비워둘 것 ("이름 |" 까지만 출력)
 - 추측하거나 지어내지 말 것. 비워두는 편이 낫다
-- 일반론(지수 조정, 시장 약세 등)으로 억지로 채우지 말 것
 - 마크다운 기호 사용 금지, 다른 설명 금지
 
-[등락률]
+[보유 종목]
 {quotes}
 
 [오늘 뉴스]
@@ -411,6 +431,7 @@ def gemini_reasons(rows, headlines):
     text = _gemini_call(prompt)
     if not text:
         return {}
+    print(f"[사유 응답]\n{text}")
 
     valid = {label for label, _ in movers}
     out = {}
@@ -418,7 +439,9 @@ def gemini_reasons(rows, headlines):
         name, sep, why = line.partition("|")
         if not sep:
             continue
-        name, why = name.strip().lstrip("-•").strip(), why.strip()
+        name = name.strip().lstrip("-•").strip()
+        name = name.split("(")[0].strip()   # 모델이 괄호를 붙여 보내는 경우 대비
+        why = why.strip()
         if name in valid and why:
             out[name] = shorten(why)
     return out
@@ -504,10 +527,9 @@ def main():
 
     kr_news = build_kr_news()
 
-    # 사유는 번역된 한국어 헤드라인을 근거로 뽑는다
-    reasons = gemini_reasons(market_rows + holding_rows,
-                             news_kr + fed_kr + kr_news)
-    market = format_quotes(market_rows, reasons)
+    # 사유는 관심 종목에만 붙인다. 번역된 한국어 헤드라인이 근거.
+    reasons = gemini_reasons(holding_rows, news_kr + fed_kr + kr_news)
+    market = format_quotes(market_rows)
     holdings = format_quotes(holding_rows, reasons, align=True)
 
     sections = (market, holdings, indicators, fed_kr, news_kr, kr_news)
