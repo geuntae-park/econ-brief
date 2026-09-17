@@ -116,6 +116,16 @@ RSS_FEEDS = [
     "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
 ]
 
+SKIP_STARTS = (
+    "My ", "I ", "Can I", "Should I", "Is this", "Am I",
+    "We ", "Dear ", "Ask ", "How much",
+)
+
+SKIP_CONTAINS = (
+    "my wife", "my husband", "my mother", "my father",
+    "my son", "my daughter", "my friend", "my brother", "my sister",
+)
+
 
 def build_news(limit=6):
     items = []
@@ -126,10 +136,14 @@ def build_news(limit=6):
                 title = e.get("title", "").strip()
                 if not title:
                     continue
-                if any(title.startswith(s) or s in title for s in SKIP_PATTERNS):
+                if title.startswith(SKIP_STARTS):
+                    continue
+                low = title.lower()
+                if any(s in low for s in SKIP_CONTAINS):
                     continue
                 items.append(title)
-        except Exception:
+        except Exception as ex:
+            print(f"RSS 실패 {url}: {ex}")
             continue
 
     seen, out = set(), []
