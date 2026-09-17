@@ -111,24 +111,27 @@ def build_market():
 
 # ---------- 뉴스 RSS ----------
 RSS_FEEDS = [
-    "https://feeds.content.dowjones.io/public/rss/mw_topstories",
     "https://www.cnbc.com/id/20910258/device/rss/rss.html",
+    "https://www.cnbc.com/id/10000664/device/rss/rss.html",
     "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
 ]
 
 
 def build_news(limit=6):
     items = []
-    cutoff = datetime.now(ZoneInfo("UTC")) - timedelta(hours=30)
     for url in RSS_FEEDS:
         try:
             feed = feedparser.parse(url)
-            for e in feed.entries[:10]:
+            for e in feed.entries[:15]:
                 title = e.get("title", "").strip()
-                if title:
-                    items.append(title)
+                if not title:
+                    continue
+                if any(title.startswith(s) or s in title for s in SKIP_PATTERNS):
+                    continue
+                items.append(title)
         except Exception:
             continue
+
     seen, out = set(), []
     for t in items:
         if t not in seen:
@@ -143,10 +146,15 @@ def build_news(limit=6):
 def gemini_summary(raw_text):
     if not GEMINI_API_KEY:
         return ""
+
+    import time
     try:
         from google import genai
         client = genai.Client(api_key=GEMINI_API_KEY)
-        prompt = f"""아래는 오늘자 미국 경제 데이터입니다.
+    except Exception:
+        return ""
+
+    prompt = f"""아래는 오늘자 미국 경제 데이터입니다.
 이 데이터만 근거로 3~4줄의 한국어 브리핑 요약을 작성하세요.
 
 규칙:
@@ -158,14 +166,22 @@ def gemini_summary(raw_text):
 [데이터]
 {raw_text}
 """
-        resp = client.models.generate_content(
-            model="gemini-flash-latest",
-            contents=prompt,
-        )
-        return (resp.text or "").strip()
-    except Exception:
-        return ""
 
+    for attempt in range(3):
+        try:
+            resp = client.models.generate_content(
+                model="gemini-flash-latest",
+                contents=prompt,
+            )
+            text = (resp.text or "").strip()
+            if text:
+                return text
+        except Exception as e:
+            print(f"Gemini 시도 {attempt + 1} 실패: {e}")
+        if attempt < 2:
+            time.sleep(8)
+
+    return ""
 
 # ---------- 텔레그램 ----------
 def send_telegram(text):
