@@ -1,5 +1,7 @@
 import os
+import re
 import time
+import calendar
 import requests
 import feedparser
 from datetime import datetime
@@ -39,6 +41,14 @@ def fred_fetch(series_id, limit=14):
     return [o for o in r.json().get("observations", []) if o["value"] != "."]
 
 
+def arrow(diff):
+    if diff > 0:
+        return "🔺"
+    if diff < 0:
+        return "🔻"
+    return "➖"
+
+
 def build_indicators():
     lines = []
     for sid, (label, mode) in FRED_SERIES.items():
@@ -50,28 +60,30 @@ def build_indicators():
             date = obs[0]["date"]
 
             if mode == "yoy":
-                obs_y = fred_fetch(sid, limit=14)
-                if len(obs_y) >= 13:
-                    prev_year = float(obs_y[12]["value"])
-                    yoy = (latest / prev_year - 1) * 100
-                    lines.append(f"{label}  {yoy:.1f}%  ({date})")
+                if len(obs) < 13:
+                    continue
+                yoy = (latest / float(obs[12]["value"]) - 1) * 100
+                if len(obs) >= 14:
+                    prev_yoy = (float(obs[1]["value"]) / float(obs[13]["value"]) - 1) * 100
+                    mark = arrow(yoy - prev_yoy)
+                else:
+                    mark = "➖"
+                lines.append(f"{mark} {label}  {yoy:.1f}%  ({date})")
             elif mode == "pct":
                 prev = float(obs[1]["value"]) if len(obs) > 1 else latest
                 diff = latest - prev
-                sign = "+" if diff >= 0 else ""
-                lines.append(f"{label}  {latest:.2f}%  ({sign}{diff:.2f})")
+                lines.append(f"{arrow(diff)} {label}  {latest:.2f}%  ({diff:+.2f})")
             elif mode == "diff_k":
                 prev = float(obs[1]["value"]) if len(obs) > 1 else latest
                 diff = latest - prev
-                lines.append(f"{label}  {diff:+,.0f}천명  ({date})")
+                lines.append(f"{arrow(diff)} {label}  {diff:+,.0f}천명  ({date})")
             else:
                 prev = float(obs[1]["value"]) if len(obs) > 1 else latest
                 diff = latest - prev
-                sign = "+" if diff >= 0 else ""
-                lines.append(f"{label}  {latest:.2f}  ({sign}{diff:.2f})")
+                lines.append(f"{arrow(diff)} {label}  {latest:.2f}  ({diff:+.2f})")
         except Exception as e:
             print(f"FRED 실패 {sid}: {e}")
-            lines.append(f"{label}  조회실패")
+            lines.append(f"⚠️ {label}  조회실패")
     return lines
 
 
@@ -113,25 +125,34 @@ def build_quotes(ticker_map):
         try:
             price, prev = yahoo_quote(tk)
             if price is None or not prev:
-                lines.append(f"{label}  조회실패")
+                lines.append(f"⚠️ {label}  조회실패")
                 continue
             chg = (price / prev - 1) * 100
-            lines.append(f"{label}  {price:,.2f}  {chg:+.2f}%")
+            lines.append(f"{arrow(chg)} {label}  {price:,.2f}  {chg:+.2f}%")
         except Exception as e:
             print(f"Yahoo 실패 {tk}: {e}")
-            lines.append(f"{label}  조회실패")
+            lines.append(f"⚠️ {label}  조회실패")
     return lines
 
 
 # ==================== 뉴스 RSS ====================
 RSS_FEEDS = [
-    "https://www.cnbc.com/id/20910258/device/rss/rss.html",
-    "https://www.cnbc.com/id/10000664/device/rss/rss.html",
-    "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
+    "https://www.cnbc.com/id/20910258/device/rss/rss.html",   # CNBC Economy
+    "https://www.cnbc.com/id/15839135/device/rss/rss.html",   # CNBC Markets
+    "https://www.cnbc.com/id/10000664/device/rss/rss.html",   # CNBC Finance
+    "https://www.cnbc.com/id/19854910/device/rss/rss.html",   # CNBC Tech
+    "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",          # WSJ Markets
+    "https://feeds.content.dowjones.io/public/rss/mw_topstories",  # MarketWatch
+    "https://news.google.com/rss/search?q=when:1d+site:reuters.com+economy+OR+fed+OR+markets&hl=en-US&gl=US&ceid=US:en",
+]
+
+FED_FEEDS = [
+    "https://www.federalreserve.gov/feeds/press_monetary.xml",
 ]
 
 KR_RSS_FEEDS = [
     "https://news.google.com/rss/search?q=SK%ED%95%98%EC%9D%B4%EB%8B%89%EC%8A%A4+OR+%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90+%EB%B0%98%EB%8F%84%EC%B2%B4&hl=ko&gl=KR&ceid=KR:ko",
+    "https://news.google.com/rss/search?q=when:1d+%EC%BD%94%EC%8A%A4%ED%94%BC+OR+%ED%99%98%EC%9C%A8+OR+%EC%99%B8%EA%B5%AD%EC%9D%B8+%EC%88%9C%EB%A7%A4%EC%88%98&hl=ko&gl=KR&ceid=KR:ko",
 ]
 
 SKIP_STARTS = (
@@ -145,58 +166,120 @@ SKIP_CONTAINS = (
 )
 
 
-def build_news(limit=6):
-    items = []
-    for url in RSS_FEEDS:
+def clean_title(entry):
+    """제목에서 구글뉴스가 덧붙인 ' - 언론사' 꼬리표를 제거한다."""
+    title = (entry.get("title") or "").strip()
+    if not title:
+        return ""
+
+    src = (entry.get("source") or {}).get("title", "")
+    if src:
+        suffix = f" - {src}"
+        while title.endswith(suffix):
+            title = title[:-len(suffix)].strip()
+
+    # 원문 제목에 이미 언론사명이 붙어 있는 경우가 있다.
+    # (예: "... 벗어나 - 조선비즈 - Chosunbiz" → 영문명만 위에서 떨어진다)
+    # 마지막 조각이 짧은 한 낱말이면 언론사명으로 보고 한 번 더 뗀다.
+    head, sep, tail = title.rpartition(" - ")
+    if sep and head and " " not in tail and len(tail) <= 8:
+        title = head.strip()
+
+    return title
+
+
+def is_personal(title):
+    if title.startswith(SKIP_STARTS):
+        return True
+    low = title.lower()
+    return any(s in low for s in SKIP_CONTAINS)
+
+
+def bigrams(title):
+    t = re.sub(r"[^0-9A-Za-z가-힣]+", "", title).lower()
+    return {t[i:i + 2] for i in range(len(t) - 1)}
+
+
+def is_near_dup(grams, seen_grams, threshold=0.6):
+    """같은 기사를 매체만 바꿔 싣는 경우를 걸러낸다."""
+    if not grams:
+        return False
+    for prev in seen_grams:
+        if not prev:
+            continue
+        overlap = len(grams & prev) / min(len(grams), len(prev))
+        if overlap >= threshold:
+            return True
+    return False
+
+
+def collect_titles(urls, limit, per_feed=10, skip_personal=False):
+    """피드를 번갈아 훑어 한 매체가 목록을 독식하지 않게 한다."""
+    buckets = []
+    for url in urls:
         try:
             feed = feedparser.parse(url)
-            for e in feed.entries[:15]:
-                title = e.get("title", "").strip()
-                if not title:
-                    continue
-                if title.startswith(SKIP_STARTS):
-                    continue
-                low = title.lower()
-                if any(s in low for s in SKIP_CONTAINS):
-                    continue
-                items.append(title)
         except Exception as ex:
             print(f"RSS 실패 {url}: {ex}")
             continue
+        bucket = []
+        for e in feed.entries[:per_feed]:
+            title = clean_title(e)
+            if not title:
+                continue
+            if skip_personal and is_personal(title):
+                continue
+            bucket.append(title)
+        buckets.append(bucket)
 
-    seen, out = set(), []
-    for t in items:
-        if t not in seen:
-            seen.add(t)
-            out.append(t)
-        if len(out) >= limit:
-            break
+    seen, seen_grams, out = set(), [], []
+    for i in range(per_feed):
+        for bucket in buckets:
+            if i >= len(bucket):
+                continue
+            title = bucket[i]
+            if title in seen:
+                continue
+            grams = bigrams(title)
+            if is_near_dup(grams, seen_grams):
+                continue
+            seen.add(title)
+            seen_grams.append(grams)
+            out.append(title)
+            if len(out) >= limit:
+                return out
     return out
 
 
-def build_kr_news(limit=4):
-    items = []
-    for url in KR_RSS_FEEDS:
+def build_news(limit=8):
+    return collect_titles(RSS_FEEDS, limit, skip_personal=True)
+
+
+def build_kr_news(limit=5):
+    return collect_titles(KR_RSS_FEEDS, limit)
+
+
+def build_fed(limit=3, max_age_days=3):
+    """최근 발표만 싣는다. 새 발표가 없으면 빈 목록 → 섹션 자체를 생략."""
+    now = time.time()
+    seen, out = set(), []
+    for url in FED_FEEDS:
         try:
             feed = feedparser.parse(url)
-            for e in feed.entries[:15]:
-                title = e.get("title", "").strip()
-                if not title:
-                    continue
-                if " - " in title:
-                    title = title.rsplit(" - ", 1)[0].strip()
-                items.append(title)
         except Exception as ex:
-            print(f"KR RSS 실패 {url}: {ex}")
+            print(f"Fed RSS 실패 {url}: {ex}")
             continue
-
-    seen, out = set(), []
-    for t in items:
-        if t not in seen:
-            seen.add(t)
-            out.append(t)
-        if len(out) >= limit:
-            break
+        for e in feed.entries[:10]:
+            pp = e.get("published_parsed")
+            if not pp or now - calendar.timegm(pp) > max_age_days * 86400:
+                continue
+            title = clean_title(e)
+            if not title or title in seen:
+                continue
+            seen.add(title)
+            out.append(title)
+            if len(out) >= limit:
+                return out
     return out
 
 
@@ -275,7 +358,7 @@ def gemini_summary(raw_text):
 - 데이터에 없는 내용은 절대 추측하지 말 것
 - 마크다운 기호 사용 금지
 - 존댓말, 간결한 문장
-- 지수 흐름, 반도체 관련 동향, 주목할 뉴스 위주
+- 지수 흐름, 반도체 관련 동향, 연준·정책 발표, 주목할 뉴스 위주
 
 [데이터]
 {raw_text}
@@ -301,30 +384,40 @@ def main():
     holdings = build_quotes(MY_TICKERS)
     indicators = build_indicators()
     news = build_news()
-    news_kr = gemini_translate_news(news)
+    fed = build_fed()
+
+    # 번역은 한 번에 묶어 호출 수와 rate limit 위험을 줄인다
+    merged = gemini_translate_news(news + fed)
+    news_kr, fed_kr = merged[:len(news)], merged[len(news):]
+
     kr_news = build_kr_news()
 
     body = f"📊 미국 경제 브리핑 | {today}\n"
 
-    body += "\n■ 시장 동향\n"
+    body += "\n📈 시장 동향\n"
     body += "\n".join(market) if market else "조회 실패"
 
-    body += "\n\n■ 관심 종목\n"
+    body += "\n\n💼 관심 종목\n"
     body += "\n".join(holdings) if holdings else "조회 실패"
 
-    body += "\n\n■ 주요 지표\n"
+    body += "\n\n📉 주요 지표\n"
     body += "\n".join(indicators) if indicators else "조회 실패"
 
-    body += "\n\n■ 주요 뉴스\n"
-    body += "\n".join(f"· {t}" for t in news_kr) if news_kr else "조회 실패"
+    if fed_kr:
+        body += "\n\n🏛️ 연준·정책 발표\n"
+        body += "\n".join(f"• {t}" for t in fed_kr)
 
-    body += "\n\n■ 국내 반도체\n"
-    body += "\n".join(f"· {t}" for t in kr_news) if kr_news else "조회 실패"
+    body += "\n\n📰 주요 뉴스\n"
+    body += "\n".join(f"• {t}" for t in news_kr) if news_kr else "조회 실패"
+
+    body += "\n\n🇰🇷 국내 시장·반도체\n"
+    body += "\n".join(f"• {t}" for t in kr_news) if kr_news else "조회 실패"
 
     summary = gemini_summary(body)
 
     if summary:
-        final = f"📊 미국 경제 브리핑 | {today}\n\n■ 요약\n{summary}\n" + body.split("\n", 1)[1]
+        final = (f"📊 미국 경제 브리핑 | {today}\n\n"
+                 f"📝 요약\n{summary}\n" + body.split("\n", 1)[1])
     else:
         final = body
 
