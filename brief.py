@@ -433,17 +433,26 @@ def gemini_reasons(rows, headlines):
         return {}
     print(f"[사유 응답]\n{text}")
 
-    valid = {label for label, _ in movers}
+    # 모델이 형식을 흔들어도 최대한 건져낸다.
+    # "1. QLD | ...", "**QLD** | ...", "QLD (나스닥100 2배) | ...", "QLD : ..." 등
+    labels = sorted({label for label, _ in movers}, key=len, reverse=True)
+    sep = "|" if "|" in text else ":"
+
     out = {}
     for line in text.split("\n"):
-        name, sep, why = line.partition("|")
-        if not sep:
+        head, found, why = line.partition(sep)
+        if not found:
             continue
-        name = name.strip().lstrip("-•").strip()
-        name = name.split("(")[0].strip()   # 모델이 괄호를 붙여 보내는 경우 대비
-        why = why.strip()
-        if name in valid and why:
-            out[name] = shorten(why)
+        why = why.strip().strip("*").strip("-–—").strip()
+        if not why:
+            continue
+        key = next((v for v in labels if v in head), None)
+        if key and key not in out:
+            out[key] = shorten(why)
+
+    missed = [v for v in labels if v not in out]
+    if missed:
+        print(f"[사유 없음] {', '.join(missed)}")
     return out
 
 
