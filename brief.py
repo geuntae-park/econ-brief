@@ -101,13 +101,13 @@ YAHOO_TICKERS = {
 
 # 레버리지 ETF는 기초지수가 움직여서 움직인다. 사유를 찾을 때 이 정보를 준다.
 TICKER_BASIS = {
-    "QLD":  "나스닥100 지수 2배 추종 ETF",
-    "TQQQ": "나스닥100 지수 3배 추종 ETF",
-    "USD":  "미국 반도체 지수 2배 추종 ETF",
-    "SOXL": "미국 반도체 지수 3배 추종 ETF",
-    "UPRO": "S&P500 지수 3배 추종 ETF",
-    "DGRO": "미국 배당성장주 ETF",
-    "SPCX": "스페이스X(민간 우주기업) 주식",
+    "QLD":  "나스닥100 지수",
+    "TQQQ": "나스닥100 지수",
+    "USD":  "미국 반도체 지수",
+    "SOXL": "미국 반도체 지수",
+    "UPRO": "S&P500 지수",
+    "DGRO": "미국 배당성장주",
+    "SPCX": "스페이스X 주가",
 }
 
 MY_TICKERS = {
@@ -394,43 +394,53 @@ def shorten(text, limit=REASON_LIMIT):
 
 
 def gemini_reasons(rows, headlines):
-    """관심 종목별 한 줄 사유를 {라벨: 사유} 로 만든다. 실패하면 빈 dict."""
+    """관심 종목별 한 줄 사유를 {라벨: 사유} 로 만든다. 실패하면 빈 dict.
+
+    QLD와 TQQQ처럼 같은 지수를 추종하는 종목은 사유가 다를 수 없다.
+    그래서 종목이 아니라 기초자산 단위로 묻고, 답을 그 묶음 전체에 나눠준다.
+    """
     movers = [(label, chg) for label, price, chg in rows if price is not None]
     if not movers or not headlines:
         return {}
 
-    lines = []
+    groups = {}   # 기초자산 -> [(티커, 등락률)]
     for label, chg in movers:
-        basis = TICKER_BASIS.get(label, "")
-        tag = f" ({basis})" if basis else ""
-        lines.append(f"{label}{tag} {chg:+.2f}%")
+        groups.setdefault(TICKER_BASIS.get(label, label), []).append((label, chg))
+
+    lines = []
+    for basis, members in groups.items():
+        names = ", ".join(t for t, _ in members)
+        avg = sum(c for _, c in members) / len(members)
+        lines.append(f"{names} ({basis}) {avg:+.1f}%")
     quotes = "\n".join(lines)
     news = "\n".join(f"- {h}" for h in headlines)
 
-    prompt = f"""아래는 오늘 내가 보유한 미국 종목의 등락률과 오늘자 뉴스 헤드라인입니다.
-각 종목이 왜 그렇게 움직였는지 한국어로 아주 짧게 설명하세요.
+    prompt = f"""아래는 오늘 내가 보유한 미국 자산의 등락률과 오늘자 뉴스 헤드라인입니다.
+각 줄이 왜 그렇게 움직였는지 한국어로 아주 짧게 설명하세요.
 
-괄호 안은 그 종목이 무엇을 추종하는지 알려주는 정보입니다.
-레버리지 ETF는 기초지수가 움직여서 움직입니다.
-따라서 기초지수나 해당 섹터에 관한 뉴스가 있으면 그것이 곧 그 종목의 사유입니다.
-반드시 연결해서 쓰세요.
+괄호 안은 그 종목이 추종하는 기초자산입니다.
+기초자산이 움직여서 종목이 움직이므로, 그 기초자산이나 해당 섹터에 관한
+뉴스가 있으면 그것이 곧 사유입니다. 반드시 연결해서 쓰세요.
 
 예시:
-  뉴스에 "나스닥 기술주 급락"이 있으면 -> TQQQ | 나스닥 급락
-  뉴스에 "반도체주 반등"이 있으면 -> SOXL | 반도체 반등
-  뉴스에 "연준 금리 인상"이 있으면 -> UPRO | 매파 연준
+  뉴스에 "나스닥 기술주 급락"이 있으면 -> QLD, TQQQ | 나스닥 급락
+  뉴스에 "반도체주 반등"이 있으면 -> USD, SOXL | 반도체 반등
 
 규칙:
-- 출력은 "티커 | 사유" 형식으로 한 줄씩, 입력 순서와 개수를 그대로 유지
-- 티커는 괄호 없이 쓸 것
+- 출력은 "왼쪽 이름들 | 사유" 형식으로 한 줄씩, 입력 순서와 개수를 그대로 유지
+- 왼쪽 이름은 입력에 적힌 그대로 옮겨 쓸 것
 - 사유는 공백 포함 {REASON_LIMIT}자 이내, 명사형으로 끝낼 것
-- 기초지수나 섹터가 겹치는 뉴스를 우선 활용할 것
+- 사유는 그 줄의 기초자산과 직접 관련된 것이어야 함
+  (나스닥100을 추종하는 줄에 반도체 이야기를 쓰지 말 것)
+- 사유는 등락 방향과 일치해야 함. 오른 줄에 하락 사유를 붙이지 말 것
+- 등락폭에 맞는 표현을 쓸 것
+  1% 미만은 보합/소폭, 급등·급락·폭락은 3% 이상일 때만
 - 뉴스에 전혀 없는 구체적 사건(실적 발표, 계약 체결, 목표가 변경)은 지어내지 말 것
-- 연결할 뉴스가 하나도 없는 종목만 비워둘 것
-- 대부분의 종목은 채워져야 정상입니다. 전부 비우는 것은 잘못된 답입니다.
+- 연결할 뉴스가 하나도 없는 줄만 비워둘 것
+- 대부분의 줄은 채워져야 정상입니다. 전부 비우는 것은 잘못된 답입니다.
 - 마크다운 기호 사용 금지, 다른 설명 금지
 
-[보유 종목]
+[보유 자산]
 {quotes}
 
 [오늘 뉴스]
@@ -442,7 +452,7 @@ def gemini_reasons(rows, headlines):
     print(f"[사유 응답]\n{text}")
 
     # 모델이 형식을 흔들어도 최대한 건져낸다.
-    # "1. QLD | ...", "**QLD** | ...", "QLD (나스닥100 2배) | ...", "QLD : ..." 등
+    # 한 줄에 여러 티커가 있으면 그 줄의 사유를 모두에게 준다.
     labels = sorted({label for label, _ in movers}, key=len, reverse=True)
     sep = "|" if "|" in text else ":"
 
@@ -454,9 +464,9 @@ def gemini_reasons(rows, headlines):
         why = why.strip().strip("*").strip("-–—").strip()
         if not why:
             continue
-        key = next((v for v in labels if v in head), None)
-        if key and key not in out:
-            out[key] = shorten(why)
+        for label in labels:
+            if label in head and label not in out:
+                out[label] = shorten(why)
 
     missed = [v for v in labels if v not in out]
     if missed:
