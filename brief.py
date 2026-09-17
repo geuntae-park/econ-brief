@@ -121,23 +121,36 @@ def yahoo_quote(ticker):
     return price, prev
 
 
-def build_quotes(ticker_map, align=False):
-    """align=True면 고정폭 코드블록용으로 자릿수를 맞춘다."""
-    lines = []
+def fetch_quotes(ticker_map):
+    """[(라벨, 현재가, 등락률)] 형태로 시세를 모은다. 실패하면 가격이 None."""
+    rows = []
     for tk, label in ticker_map.items():
         try:
             price, prev = yahoo_quote(tk)
             if price is None or not prev:
-                lines.append(f"⚠️ {label}  조회실패")
+                rows.append((label, None, None))
                 continue
-            chg = (price / prev - 1) * 100
-            if align:
-                lines.append(f"{arrow(chg)} {label:<5}{price:>8,.2f} {chg:>+6.1f}%")
-            else:
-                lines.append(f"{arrow(chg)} {label}  {price:,.2f}  {chg:+.2f}%")
+            rows.append((label, price, (price / prev - 1) * 100))
         except Exception as e:
             print(f"Yahoo 실패 {tk}: {e}")
+            rows.append((label, None, None))
+    return rows
+
+
+def format_quotes(rows, reasons=None, align=False):
+    """align=True면 고정폭 코드블록용으로 자릿수를 맞춘다."""
+    reasons = reasons or {}
+    lines = []
+    for label, price, chg in rows:
+        if price is None:
             lines.append(f"⚠️ {label}  조회실패")
+            continue
+        why = reasons.get(label, "")
+        tail = f"  {why}" if why else ""
+        if align:
+            lines.append(f"{arrow(chg)} {label:<5}{price:>8,.2f} {chg:>+6.1f}%{tail}")
+        else:
+            lines.append(f"{arrow(chg)} {label}  {price:,.2f}  {chg:+.2f}%{tail}")
     return lines
 
 
@@ -356,6 +369,61 @@ def gemini_translate_news(titles):
     return out if len(out) == len(titles) else titles
 
 
+REASON_LIMIT = 8
+
+
+def shorten(text, limit=REASON_LIMIT):
+    """코드블록 가로 폭을 지키려고 사유를 짧게 자른다. 가능하면 띄어쓰기에서."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0]
+    return cut if len(cut) >= 4 else text[:limit]
+
+
+def gemini_reasons(rows, headlines):
+    """종목별 한 줄 사유를 {라벨: 사유} 로 만든다. 실패하면 빈 dict."""
+    movers = [(label, chg) for label, price, chg in rows if price is not None]
+    if not movers or not headlines:
+        return {}
+
+    quotes = "\n".join(f"{label} {chg:+.2f}%" for label, chg in movers)
+    news = "\n".join(f"- {h}" for h in headlines)
+
+    prompt = f"""아래는 오늘 미국 시장의 지수·종목 등락률과 오늘자 뉴스 헤드라인입니다.
+각 항목이 왜 그렇게 움직였는지 한국어로 아주 짧게 설명하세요.
+
+규칙:
+- 출력은 "이름 | 사유" 형식으로 한 줄씩, 입력 순서와 개수를 그대로 유지
+- 사유는 공백 포함 {REASON_LIMIT}자 이내, 명사형으로 끝낼 것 (예: 반도체 급락, 매파 FOMC)
+- 뉴스에 직접 근거가 있을 때만 쓸 것
+- 근거가 없으면 사유를 비워둘 것 ("이름 |" 까지만 출력)
+- 추측하거나 지어내지 말 것. 비워두는 편이 낫다
+- 일반론(지수 조정, 시장 약세 등)으로 억지로 채우지 말 것
+- 마크다운 기호 사용 금지, 다른 설명 금지
+
+[등락률]
+{quotes}
+
+[오늘 뉴스]
+{news}
+"""
+    text = _gemini_call(prompt)
+    if not text:
+        return {}
+
+    valid = {label for label, _ in movers}
+    out = {}
+    for line in text.split("\n"):
+        name, sep, why = line.partition("|")
+        if not sep:
+            continue
+        name, why = name.strip().lstrip("-•").strip(), why.strip()
+        if name in valid and why:
+            out[name] = shorten(why)
+    return out
+
+
 def gemini_summary(raw_text):
     prompt = f"""아래는 오늘자 미국 경제 데이터입니다.
 이 데이터만 근거로 4~5줄의 한국어 브리핑 요약을 작성하세요.
@@ -424,8 +492,8 @@ def compose(as_html, summary, market, holdings, indicators, fed, news, kr_news):
 
 
 def main():
-    market = build_quotes(YAHOO_TICKERS)
-    holdings = build_quotes(MY_TICKERS, align=True)
+    market_rows = fetch_quotes(YAHOO_TICKERS)
+    holding_rows = fetch_quotes(MY_TICKERS)
     indicators = build_indicators()
     news = build_news()
     fed = build_fed()
@@ -435,6 +503,12 @@ def main():
     news_kr, fed_kr = merged[:len(news)], merged[len(news):]
 
     kr_news = build_kr_news()
+
+    # 사유는 번역된 한국어 헤드라인을 근거로 뽑는다
+    reasons = gemini_reasons(market_rows + holding_rows,
+                             news_kr + fed_kr + kr_news)
+    market = format_quotes(market_rows, reasons)
+    holdings = format_quotes(holding_rows, reasons, align=True)
 
     sections = (market, holdings, indicators, fed_kr, news_kr, kr_news)
     summary = gemini_summary(compose(False, None, *sections))
