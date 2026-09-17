@@ -211,26 +211,28 @@ def _gemini_client():
         print(f"Gemini 클라이언트 생성 실패: {e}")
         return None
 
+GEMINI_MODELS = ["gemini-3.6-flash", "gemini-flash-latest"]
+
 
 def _gemini_call(prompt, tries=3):
     client = _gemini_client()
     if client is None:
         return ""
-    for attempt in range(tries):
-        try:
-            resp = client.models.generate_content(
-                model="gemini-flash-latest",
-                contents=prompt,
-            )
-            text = (resp.text or "").strip()
-            if text:
-                return text
-        except Exception as e:
-            print(f"Gemini 시도 {attempt + 1} 실패: {e}")
-        if attempt < tries - 1:
-            time.sleep(8)
+    for model in GEMINI_MODELS:
+        for attempt in range(tries):
+            try:
+                resp = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                )
+                text = (resp.text or "").strip()
+                if text:
+                    return text
+            except Exception as e:
+                print(f"[{model}] 시도 {attempt + 1} 실패: {e}")
+            if attempt < tries - 1:
+                time.sleep(15)
     return ""
-
 
 def gemini_translate_news(titles):
     if not titles:
