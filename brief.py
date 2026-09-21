@@ -28,6 +28,20 @@ FRED_SERIES = {
 }
 
 
+def get_json(url, tries=3, **kwargs):
+    """일시적인 429/5xx/네트워크 오류로 그날 항목이 통째로 빠지지 않도록 재시도한다."""
+    for attempt in range(tries):
+        try:
+            r = requests.get(url, timeout=20, **kwargs)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            if attempt == tries - 1:
+                raise
+            print(f"재시도 {attempt + 1}/{tries - 1}: {url.split('?')[0]} ({e})")
+            time.sleep(2 * (attempt + 1))
+
+
 def fred_fetch(series_id, limit=14):
     url = "https://api.stlouisfed.org/fred/series/observations"
     params = {
@@ -37,9 +51,8 @@ def fred_fetch(series_id, limit=14):
         "sort_order": "desc",
         "limit": limit,
     }
-    r = requests.get(url, params=params, timeout=20)
-    r.raise_for_status()
-    return [o for o in r.json().get("observations", []) if o["value"] != "."]
+    data = get_json(url, params=params)
+    return [o for o in data.get("observations", []) if o["value"] != "."]
 
 
 def arrow(diff):
@@ -97,6 +110,8 @@ YAHOO_TICKERS = {
     "^DJI":  "다우",
     "^SOX":  "필라델피아반도체",
     "^VIX":  "VIX",
+    "^KS11": "코스피",
+    "KRW=X": "원/달러",
 }
 
 # 레버리지 ETF는 기초지수가 움직여서 움직인다. 사유를 찾을 때 이 정보를 준다.
@@ -105,7 +120,7 @@ TICKER_BASIS = {
     "TQQQ": "나스닥100 지수",
     "USD":  "미국 반도체 지수",
     "SOXL": "미국 반도체 지수",
-    "UPRO": "S&P500 지수",
+    "KORU": "한국 증시(MSCI 코리아)·원달러 환율",
     "DGRO": "미국 배당성장주",
     "SPCX": "스페이스X 주가",
 }
@@ -115,7 +130,7 @@ MY_TICKERS = {
     "TQQQ": "TQQQ",
     "USD":  "USD",
     "SOXL": "SOXL",
-    "UPRO": "UPRO",
+    "KORU": "KORU",
     "DGRO": "DGRO",
     "SPCX": "SPCX",
 }
@@ -123,13 +138,19 @@ MY_TICKERS = {
 
 def yahoo_quote(ticker):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(url, headers=headers,
-                     params={"range": "5d", "interval": "1d"}, timeout=20)
-    r.raise_for_status()
-    meta = r.json()["chart"]["result"][0]["meta"]
+    data = get_json(url, headers={"User-Agent": "Mozilla/5.0"},
+                    params={"range": "5d", "interval": "1d"})
+    result = data["chart"]["result"][0]
+    meta = result["meta"]
     price = meta.get("regularMarketPrice")
-    prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+
+    # chartPreviousClose는 요청 구간(5일) 이전의 종가라 하루 등락률이 되지 않는다.
+    # 일봉 종가에서 직전 거래일 값을 직접 고른다.
+    closes = [c for c in (result["indicators"]["quote"][0].get("close") or [])
+              if c is not None]
+    prev = closes[-2] if len(closes) >= 2 else None
+    if prev is None:
+        prev = meta.get("regularMarketPreviousClose") or meta.get("chartPreviousClose")
     return price, prev
 
 
@@ -167,23 +188,27 @@ def format_quotes(rows, reasons=None, align=False):
 
 
 # ==================== 뉴스 RSS ====================
+# 기사 나이 상한. 죽은 피드가 옛날 기사를 계속 물어와도 여기서 걸린다.
+# (2026-09 기준 WSJ RSS는 2025-01에서 멈춰 602일 된 기사를 내보내고 있었다)
+MAX_NEWS_AGE_HOURS = 24
+
 RSS_FEEDS = [
-    "https://www.cnbc.com/id/20910258/device/rss/rss.html",   # CNBC Economy
-    "https://www.cnbc.com/id/15839135/device/rss/rss.html",   # CNBC Markets
-    "https://www.cnbc.com/id/10000664/device/rss/rss.html",   # CNBC Finance
-    "https://www.cnbc.com/id/19854910/device/rss/rss.html",   # CNBC Tech
-    "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",          # WSJ Markets
-    "https://feeds.content.dowjones.io/public/rss/mw_topstories",  # MarketWatch
-    "https://news.google.com/rss/search?q=when:1d+site:reuters.com+economy+OR+fed+OR+markets&hl=en-US&gl=US&ceid=US:en",
+    ("CNBC",        "https://www.cnbc.com/id/20910258/device/rss/rss.html"),
+    ("CNBC",        "https://www.cnbc.com/id/10000664/device/rss/rss.html"),
+    ("CNBC",        "https://www.cnbc.com/id/19854910/device/rss/rss.html"),
+    ("MarketWatch", "https://feeds.content.dowjones.io/public/rss/mw_topstories"),
+    ("Reuters",     "https://news.google.com/rss/search?q=when:1d+site:reuters.com+economy+OR+fed+OR+markets&hl=en-US&gl=US&ceid=US:en"),
+    ("FT",          "https://news.google.com/rss/search?q=when:1d+site:ft.com+markets+OR+economy&hl=en-US&gl=US&ceid=US:en"),
+    ("Bloomberg",   "https://news.google.com/rss/search?q=when:1d+site:bloomberg.com+markets+OR+economy&hl=en-US&gl=US&ceid=US:en"),
 ]
 
 FED_FEEDS = [
-    "https://www.federalreserve.gov/feeds/press_monetary.xml",
+    ("연준", "https://www.federalreserve.gov/feeds/press_monetary.xml"),
 ]
 
 KR_RSS_FEEDS = [
-    "https://news.google.com/rss/search?q=SK%ED%95%98%EC%9D%B4%EB%8B%89%EC%8A%A4+OR+%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90+%EB%B0%98%EB%8F%84%EC%B2%B4&hl=ko&gl=KR&ceid=KR:ko",
-    "https://news.google.com/rss/search?q=when:1d+%EC%BD%94%EC%8A%A4%ED%94%BC+OR+%ED%99%98%EC%9C%A8+OR+%EC%99%B8%EA%B5%AD%EC%9D%B8+%EC%88%9C%EB%A7%A4%EC%88%98&hl=ko&gl=KR&ceid=KR:ko",
+    ("구글뉴스", "https://news.google.com/rss/search?q=SK%ED%95%98%EC%9D%B4%EB%8B%89%EC%8A%A4+OR+%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90+%EB%B0%98%EB%8F%84%EC%B2%B4&hl=ko&gl=KR&ceid=KR:ko"),
+    ("구글뉴스", "https://news.google.com/rss/search?q=when:1d+%EC%BD%94%EC%8A%A4%ED%94%BC+OR+%ED%99%98%EC%9C%A8+OR+%EC%99%B8%EA%B5%AD%EC%9D%B8+%EC%88%9C%EB%A7%A4%EC%88%98&hl=ko&gl=KR&ceid=KR:ko"),
 ]
 
 SKIP_STARTS = (
@@ -244,10 +269,61 @@ def is_near_dup(grams, seen_grams, threshold=0.6):
     return False
 
 
-def collect_titles(urls, limit, per_feed=10, skip_personal=False):
-    """피드를 번갈아 훑어 한 매체가 목록을 독식하지 않게 한다."""
-    buckets = []
-    for url in urls:
+# 구글뉴스가 돌려주는 매체명이 도메인이거나 영문이라 표기를 통일한다
+SOURCE_ALIASES = {
+    "bloomberg.com": "Bloomberg",
+    "reuters.com": "Reuters",
+    "ft.com": "FT",
+    "Financial Times": "FT",
+    "Chosunbiz": "조선비즈",
+    "economist.co.kr": "이코노미스트",
+    "v.daum.net": "다음뉴스",
+    "n.news.naver.com": "네이버뉴스",
+}
+
+# 시세표·순위표처럼 읽을 내용이 없는 기사
+SKIP_TITLE_STARTS = ("[표]", "[부고]", "[인사]", "[표1]", "[표2]")
+
+# 국내 섹션 관련성 필터.
+# "외국인 순매수" 같은 표현만 보고 인도네시아 증시 기사가 딸려오는 일이 있어,
+# 국내 시장을 가리키는 낱말이 제목에 하나라도 있어야 싣는다.
+# ("외국인", "기관"처럼 어느 나라 기사에나 나오는 말은 일부러 넣지 않았다)
+KR_KEYWORDS = (
+    "코스피", "코스닥", "증시", "국내", "한국", "서학",
+    "삼성전자", "SK하이닉스", "하이닉스", "반도체", "D램", "HBM",
+    "원·달러", "원달러", "원/달러", "환율",
+    "WGBI", "채권시장", "국고채",
+)
+
+
+def clean_source(name, fallback):
+    name = (name or "").strip()
+    if not name:
+        return fallback
+    if name in SOURCE_ALIASES:
+        return SOURCE_ALIASES[name]
+    # 그래도 도메인처럼 보이면 첫 조각만 쓴다 (예: example.co.kr -> Example)
+    if "." in name and " " not in name:
+        return name.split(".")[0].capitalize()
+    return name
+
+
+def entry_age_hours(entry):
+    """발행 시각을 모르면 None. 모르는 기사는 싣지 않는다."""
+    pp = entry.get("published_parsed") or entry.get("updated_parsed")
+    if not pp:
+        return None
+    return (time.time() - calendar.timegm(pp)) / 3600
+
+
+def collect_items(feeds, limit, per_feed=10, max_age_hours=MAX_NEWS_AGE_HOURS,
+                  skip_personal=False, require=None):
+    """피드를 번갈아 훑어 한 매체가 목록을 독식하지 않게 한다.
+
+    각 항목은 {title, link, source} 로 돌려준다.
+    """
+    buckets, dropped = [], 0
+    for name, url in feeds:
         try:
             feed = feedparser.parse(url)
         except Exception as ex:
@@ -260,58 +336,56 @@ def collect_titles(urls, limit, per_feed=10, skip_personal=False):
                 continue
             if skip_personal and is_personal(title):
                 continue
-            bucket.append(title)
+            if title.startswith(SKIP_TITLE_STARTS):
+                continue
+            if require and not any(k in title for k in require):
+                continue
+            if max_age_hours:
+                age = entry_age_hours(e)
+                if age is None or age > max_age_hours:
+                    dropped += 1
+                    continue
+            bucket.append({
+                "title": title,
+                "link": e.get("link", ""),
+                # 구글뉴스는 실제 언론사를 알려준다. 없으면 피드 이름을 쓴다.
+                "source": clean_source((e.get("source") or {}).get("title", ""), name),
+            })
         buckets.append(bucket)
+
+    if dropped:
+        print(f"[신선도 제외] {dropped}건 (기준 {max_age_hours}시간)")
 
     seen, seen_grams, out = set(), [], []
     for i in range(per_feed):
         for bucket in buckets:
             if i >= len(bucket):
                 continue
-            title = bucket[i]
-            if title in seen:
+            item = bucket[i]
+            if item["title"] in seen:
                 continue
-            grams = bigrams(title)
+            grams = bigrams(item["title"])
             if is_near_dup(grams, seen_grams):
                 continue
-            seen.add(title)
+            seen.add(item["title"])
             seen_grams.append(grams)
-            out.append(title)
+            out.append(item)
             if len(out) >= limit:
                 return out
     return out
 
 
 def build_news(limit=8):
-    return collect_titles(RSS_FEEDS, limit, skip_personal=True)
+    return collect_items(RSS_FEEDS, limit, skip_personal=True)
 
 
 def build_kr_news(limit=5):
-    return collect_titles(KR_RSS_FEEDS, limit)
+    return collect_items(KR_RSS_FEEDS, limit, require=KR_KEYWORDS)
 
 
 def build_fed(limit=3, max_age_days=3):
     """최근 발표만 싣는다. 새 발표가 없으면 빈 목록 → 섹션 자체를 생략."""
-    now = time.time()
-    seen, out = set(), []
-    for url in FED_FEEDS:
-        try:
-            feed = feedparser.parse(url)
-        except Exception as ex:
-            print(f"Fed RSS 실패 {url}: {ex}")
-            continue
-        for e in feed.entries[:10]:
-            pp = e.get("published_parsed")
-            if not pp or now - calendar.timegm(pp) > max_age_days * 86400:
-                continue
-            title = clean_title(e)
-            if not title or title in seen:
-                continue
-            seen.add(title)
-            out.append(title)
-            if len(out) >= limit:
-                return out
-    return out
+    return collect_items(FED_FEEDS, limit, max_age_hours=max_age_days * 24)
 
 
 # ==================== Gemini ====================
@@ -425,6 +499,7 @@ def gemini_reasons(rows, headlines):
 예시:
   뉴스에 "나스닥 기술주 급락"이 있으면 -> QLD, TQQQ | 나스닥 급락
   뉴스에 "반도체주 반등"이 있으면 -> USD, SOXL | 반도체 반등
+  뉴스에 "코스피 상승" 또는 "환율 하락"이 있으면 -> KORU | 코스피 강세
 
 규칙:
 - 출력은 "왼쪽 이름들 | 사유" 형식으로 한 줄씩, 입력 순서와 개수를 그대로 유지
@@ -506,6 +581,24 @@ def send_telegram(text, parse_mode=None):
 
 
 # ==================== 조립 ====================
+def news_line(item, as_html):
+    """제목을 기사 링크로 감싸고 뒤에 매체명을 붙인다."""
+    title = item.get("title_kr") or item["title"]
+    source = item.get("source", "")
+
+    if as_html:
+        text = html.escape(title, quote=False)
+        link = item.get("link", "")
+        if link:
+            text = f'<a href="{html.escape(link, quote=True)}">{text}</a>'
+        tail = f" ({html.escape(source, quote=False)})" if source else ""
+    else:
+        text = title
+        tail = f" ({source})" if source else ""
+
+    return f"• {text}{tail}"
+
+
 def compose(as_html, summary, market, holdings, indicators, fed, news, kr_news):
     """같은 내용을 평문(Gemini 입력용)과 HTML(발송용) 두 벌로 만든다."""
     # 따옴표까지 바꾸면 &#x27; 이 그대로 노출될 수 있어 태그 문자만 이스케이프한다
@@ -530,13 +623,13 @@ def compose(as_html, summary, market, holdings, indicators, fed, news, kr_news):
 
     if fed:
         parts.append("🏛️ 연준·정책 발표\n" +
-                     "\n".join(f"• {esc(t)}" for t in fed))
+                     "\n".join(news_line(i, as_html) for i in fed))
 
     parts.append("📰 주요 뉴스\n" +
-                 ("\n".join(f"• {esc(t)}" for t in news) if news else "조회 실패"))
+                 ("\n".join(news_line(i, as_html) for i in news) if news else "조회 실패"))
 
     parts.append("🇰🇷 국내 시장·반도체\n" +
-                 ("\n".join(f"• {esc(t)}" for t in kr_news) if kr_news else "조회 실패"))
+                 ("\n".join(news_line(i, as_html) for i in kr_news) if kr_news else "조회 실패"))
 
     return "\n\n".join(parts)
 
@@ -547,19 +640,21 @@ def main():
     indicators = build_indicators()
     news = build_news()
     fed = build_fed()
-
-    # 번역은 한 번에 묶어 호출 수와 rate limit 위험을 줄인다
-    merged = gemini_translate_news(news + fed)
-    news_kr, fed_kr = merged[:len(news)], merged[len(news):]
-
     kr_news = build_kr_news()
 
+    # 번역은 한 번에 묶어 호출 수와 rate limit 위험을 줄인다
+    foreign = news + fed
+    for item, title_kr in zip(foreign, gemini_translate_news([i["title"] for i in foreign])):
+        item["title_kr"] = title_kr
+
     # 사유는 관심 종목에만 붙인다. 번역된 한국어 헤드라인이 근거.
-    reasons = gemini_reasons(holding_rows, news_kr + fed_kr + kr_news)
+    headlines = [i.get("title_kr") or i["title"] for i in foreign + kr_news]
+    reasons = gemini_reasons(holding_rows, headlines)
+
     market = format_quotes(market_rows)
     holdings = format_quotes(holding_rows, reasons, align=True)
 
-    sections = (market, holdings, indicators, fed_kr, news_kr, kr_news)
+    sections = (market, holdings, indicators, fed, news, kr_news)
     summary = gemini_summary(compose(False, None, *sections))
     send_telegram(compose(True, summary, *sections), parse_mode="HTML")
     print("발송 완료")
