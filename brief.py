@@ -485,6 +485,7 @@ def gemini_translate_news(titles):
     if len(out) != len(titles):
         print(f"[번역] 줄 수 불일치 {len(out)} != {len(titles)} → 원문 유지")
         return titles, False
+    print(f"[번역] {len(out)}건 완료 (예: {out[0][:30]})")
     return out, True
 
 
