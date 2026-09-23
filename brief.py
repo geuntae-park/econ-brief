@@ -401,8 +401,28 @@ def _gemini_client():
 
 GEMINI_MODELS = ["gemini-3.6-flash", "gemini-flash-latest"]
 
+# 아침 정기 실행 때 503(혼잡)이 몰린다. 15초 고정 대기로는 구간을 못 넘겨
+# 번역·요약이 통째로 날아갔다. 레포가 public이라 Actions 시간은 공짜이므로
+# 넉넉히 기다린다.
+GEMINI_BACKOFF = [10, 30, 60, 90]
 
-def _gemini_call(prompt, tries=3):
+# 호출 사이 간격. 연달아 쏘면 분당 요청 제한(429)에 걸린다.
+GEMINI_GAP = 20
+
+# 기다리면 풀리는 오류. 400·404·PERMISSION_DENIED는 기다려도 그대로다.
+GEMINI_TRANSIENT = (
+    "503", "429", "500", "502", "504",
+    "UNAVAILABLE", "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED", "INTERNAL",
+    "TIMEOUT", "CONNECTION", "RESET",
+)
+
+
+def _is_transient(err):
+    text = str(err).upper()
+    return any(k in text for k in GEMINI_TRANSIENT)
+
+
+def _gemini_call(prompt, tries=4):
     client = _gemini_client()
     if client is None:
         return ""
@@ -416,15 +436,25 @@ def _gemini_call(prompt, tries=3):
                 text = (resp.text or "").strip()
                 if text:
                     return text
+                print(f"[{model}] 시도 {attempt + 1}: 빈 응답")
             except Exception as e:
                 print(f"[{model}] 시도 {attempt + 1} 실패: {e}")
+                if not _is_transient(e):
+                    print(f"[{model}] 일시 오류가 아니므로 다음 모델로 넘어감")
+                    break
             if attempt < tries - 1:
-                time.sleep(15)
+                time.sleep(GEMINI_BACKOFF[min(attempt, len(GEMINI_BACKOFF) - 1)])
+    print("[Gemini] 모든 모델 실패")
     return ""
 
 def gemini_translate_news(titles):
+    """(번역된 제목들, 성공 여부)를 돌려준다.
+
+    실패하면 원문을 그대로 돌려주는데, 원문이 영어라 그냥 두면
+    왜 영문인지 알 수 없다. 그래서 성공 여부를 같이 알려준다.
+    """
     if not titles:
-        return titles
+        return titles, True
 
     joined = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
     prompt = f"""아래 영문 경제 뉴스 헤드라인을 한국어로 번역하세요.
@@ -439,7 +469,7 @@ def gemini_translate_news(titles):
 """
     text = _gemini_call(prompt)
     if not text:
-        return titles
+        return titles, False
 
     out = []
     for line in text.split("\n"):
@@ -452,7 +482,10 @@ def gemini_translate_news(titles):
                 line = tail.strip()
         out.append(line)
 
-    return out if len(out) == len(titles) else titles
+    if len(out) != len(titles):
+        print(f"[번역] 줄 수 불일치 {len(out)} != {len(titles)} → 원문 유지")
+        return titles, False
+    return out, True
 
 
 REASON_LIMIT = 8
@@ -599,7 +632,8 @@ def news_line(item, as_html):
     return f"• {text}{tail}"
 
 
-def compose(as_html, summary, market, holdings, indicators, fed, news, kr_news):
+def compose(as_html, summary, market, holdings, indicators, fed, news, kr_news,
+            translated_ok=True):
     """같은 내용을 평문(Gemini 입력용)과 HTML(발송용) 두 벌로 만든다."""
     # 따옴표까지 바꾸면 &#x27; 이 그대로 노출될 수 있어 태그 문자만 이스케이프한다
     esc = (lambda t: html.escape(t, quote=False)) if as_html else (lambda t: t)
@@ -621,11 +655,14 @@ def compose(as_html, summary, market, holdings, indicators, fed, news, kr_news):
     parts.append("📉 주요 지표\n" +
                  ("\n".join(esc(l) for l in indicators) if indicators else "조회 실패"))
 
+    # 번역이 실패하면 영문 제목이 그대로 나간다. 왜 영문인지 알 수 있게 표시한다.
+    mark = "" if translated_ok else " (번역 실패)"
+
     if fed:
-        parts.append("🏛️ 연준·정책 발표\n" +
+        parts.append(f"🏛️ 연준·정책 발표{mark}\n" +
                      "\n".join(news_line(i, as_html) for i in fed))
 
-    parts.append("📰 주요 뉴스\n" +
+    parts.append(f"📰 주요 뉴스{mark}\n" +
                  ("\n".join(news_line(i, as_html) for i in news) if news else "조회 실패"))
 
     parts.append("🇰🇷 국내 시장·반도체\n" +
@@ -644,10 +681,12 @@ def main():
 
     # 번역은 한 번에 묶어 호출 수와 rate limit 위험을 줄인다
     foreign = news + fed
-    for item, title_kr in zip(foreign, gemini_translate_news([i["title"] for i in foreign])):
+    titles_kr, translated_ok = gemini_translate_news([i["title"] for i in foreign])
+    for item, title_kr in zip(foreign, titles_kr):
         item["title_kr"] = title_kr
 
     # 사유는 관심 종목에만 붙인다. 번역된 한국어 헤드라인이 근거.
+    time.sleep(GEMINI_GAP)
     headlines = [i.get("title_kr") or i["title"] for i in foreign + kr_news]
     reasons = gemini_reasons(holding_rows, headlines)
 
@@ -655,8 +694,11 @@ def main():
     holdings = format_quotes(holding_rows, reasons, align=True)
 
     sections = (market, holdings, indicators, fed, news, kr_news)
-    summary = gemini_summary(compose(False, None, *sections))
-    send_telegram(compose(True, summary, *sections), parse_mode="HTML")
+    time.sleep(GEMINI_GAP)
+    summary = gemini_summary(compose(False, None, *sections,
+                                     translated_ok=translated_ok))
+    send_telegram(compose(True, summary, *sections,
+                          translated_ok=translated_ok), parse_mode="HTML")
     print("발송 완료")
 
 
