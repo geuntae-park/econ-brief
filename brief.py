@@ -166,6 +166,22 @@ def yahoo_quote(ticker):
     return price, prev
 
 
+# 필라델피아반도체가 왜 그렇게 움직였는지는 결국 구성종목이 설명한다.
+# 브리핑에 싣지는 않고 요약 프롬프트에만 넣는다 (메시지를 가볍게 유지).
+SEMI_TICKERS = {
+    "NVDA": "엔비디아", "AVGO": "브로드컴", "AMD": "AMD",
+    "MU": "마이크론", "INTC": "인텔", "TSM": "TSMC",
+}
+
+
+def semi_context():
+    rows = [r for r in fetch_quotes(SEMI_TICKERS) if r[1] is not None]
+    if not rows:
+        return ""
+    rows.sort(key=lambda r: r[2], reverse=True)
+    return "\n".join(f"- {label} {chg:+.2f}%" for label, _, chg in rows)
+
+
 def fetch_quotes(ticker_map):
     """[(라벨, 현재가, 등락률)] 형태로 시세를 모은다. 실패하면 가격이 None."""
     rows = []
@@ -212,6 +228,9 @@ RSS_FEEDS = [
     ("Reuters",     "https://news.google.com/rss/search?q=when:1d+site:reuters.com+economy+OR+fed+OR+markets&hl=en-US&gl=US&ceid=US:en"),
     ("FT",          "https://news.google.com/rss/search?q=when:1d+site:ft.com+markets+OR+economy&hl=en-US&gl=US&ceid=US:en"),
     ("Bloomberg",   "https://news.google.com/rss/search?q=when:1d+site:bloomberg.com+markets+OR+economy&hl=en-US&gl=US&ceid=US:en"),
+    # 반도체는 보유 비중이 가장 큰데 일반 경제 뉴스 8건에는 거의 안 잡힌다.
+    # 필라델피아반도체가 왜 움직였는지 설명할 재료가 없어 따로 물어온다.
+    ("반도체",       "https://news.google.com/rss/search?q=when%3A1d%20%28semiconductor%20OR%20chipmaker%20OR%20Nvidia%20OR%20AMD%20OR%20Micron%20OR%20TSMC%20OR%20Intel%29%20stock%20OR%20shares&hl=en-US&gl=US&ceid=US:en"),
 ]
 
 FED_FEEDS = [
@@ -231,6 +250,14 @@ SKIP_STARTS = (
 SKIP_CONTAINS = (
     "my wife", "my husband", "my mother", "my father",
     "my son", "my daughter", "my friend", "my brother", "my sister",
+    # 개별 종목 피드에 섞여 오는 낚시성 제목
+    "here's what", "could be worth", "should you buy", "is it too late",
+    "reasons to buy", "better buy", "prediction:", "millionaire",
+    "motley fool", "if you'd invested", "why you should",
+    # MarketWatch 등이 섞어 보내는 개인 재테크 조언 기사
+    "you should", "should you", "how much should",
+    "your retirement", "your 401", "your mortgage", "your savings",
+    "your credit score", "your paycheck",
 )
 
 
@@ -257,7 +284,9 @@ def clean_title(entry):
 
 
 def is_personal(title):
-    if title.startswith(SKIP_STARTS):
+    # 따옴표로 시작하는 제목이 있어 앞의 인용부호를 떼고 본다
+    # (예: '‘I have $400,000 in equity’: I’m 80. Should I sell my house')
+    if title.lstrip("‘’“”'\"").startswith(SKIP_STARTS):
         return True
     low = title.lower()
     return any(s in low for s in SKIP_CONTAINS)
@@ -595,8 +624,13 @@ def gemini_reasons(rows, headlines):
     return out
 
 
-def gemini_summary(raw_text):
+def gemini_summary(raw_text, extra=""):
     holdings = "\n".join(f"- {tk}: {desc}" for tk, desc in TICKER_DETAIL.items())
+    ref = f"""
+[참고 자료 — 브리핑에는 싣지 않지만 원인을 짚는 데 쓸 것]
+필라델피아반도체 지수 구성종목 등락:
+{extra}
+""" if extra else ""
 
     prompt = f"""아래는 오늘자 미국 경제 브리핑 데이터입니다.
 이 데이터만 근거로 두 부분을 작성하세요.
@@ -604,6 +638,15 @@ def gemini_summary(raw_text):
 [1부] 시장 흐름
 - 불릿 3개. 오늘 가장 중요한 것만 고를 것
 - 지수 흐름, 반도체 동향, 연준·정책, 주목할 뉴스 중에서 선택
+- "무엇이 일어났는지"로 끝내지 말고 반드시 "왜"까지 쓸 것.
+  "필라델피아반도체는 상승했습니다"로 끝내면 안 된다
+- 특히 지수들이 서로 다른 방향으로 갈렸으면(혼조), 왜 그 지수만 달랐는지를
+  구성종목 등락이나 뉴스에서 근거를 찾아 반드시 설명할 것
+  (예: 주요 지수 혼조 속 필라델피아반도체만 상승 —
+   브로드컴·마이크론 강세가 지수를 끌어올림)
+- 근거는 아래 데이터와 참고 자료 안에서만 찾을 것
+- 정말 원인을 못 찾겠으면 지어내지 말고
+  "원인은 오늘 데이터로 확인되지 않습니다"라고 쓸 것
 
 [2부] 뉴스와 내 종목
 - 오늘 뉴스 중에서 보유 종목과 실제로 연결되는 것만 골라 불릿 2~3개
@@ -626,7 +669,7 @@ def gemini_summary(raw_text):
 
 [보유 종목이 추종하는 것]
 {holdings}
-
+{ref}
 [데이터]
 {raw_text}
 """
@@ -651,6 +694,16 @@ def send_telegram(text, parse_mode=None):
 # ==================== 조립 ====================
 BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.S)
 
+# 숫자로만 이루어진 강조는 <code>로 감싼다. 텔레그램이 옅은 음영을 깔아줘서
+# 볼드만 쓸 때보다 휴대폰에서 훨씬 잘 보인다.
+NUMERIC_RE = re.compile(r"^[\d+\-.,%\s]+$")
+
+
+def emphasize(inner):
+    if NUMERIC_RE.match(inner):
+        return f"<code>{inner}</code>"
+    return f"<b><u>{inner}</u></b>"
+
 
 def rich(text, as_html):
     """**강조** 마커를 처리한다.
@@ -660,7 +713,8 @@ def rich(text, as_html):
     """
     if not as_html:
         return BOLD_RE.sub(r"\1", text)
-    return BOLD_RE.sub(r"<b>\1</b>", html.escape(text, quote=False))
+    escaped = html.escape(text, quote=False)
+    return BOLD_RE.sub(lambda m: emphasize(m.group(1)), escaped)
 
 
 def split_summary(text):
@@ -757,7 +811,9 @@ def main():
     sections = (market, holdings, indicators, fed, news, kr_news)
     time.sleep(GEMINI_GAP)
     summary = gemini_summary(compose(False, None, *sections,
-                                     translated_ok=translated_ok))
+                                     translated_ok=translated_ok),
+                             extra=semi_context())
+    print(f"[요약 원문]\n{summary}")
     send_telegram(compose(True, summary, *sections,
                           translated_ok=translated_ok), parse_mode="HTML")
     print("발송 완료")
