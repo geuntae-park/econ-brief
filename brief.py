@@ -125,6 +125,18 @@ TICKER_BASIS = {
     "SPCX": "스페이스X 주가",
 }
 
+# 요약에서 "왜 그렇게 움직였는지"를 설명하려면 배수까지 알아야 한다.
+# (TICKER_BASIS는 사유를 묶는 열쇠라 배수를 뺀 채로 둔다)
+TICKER_DETAIL = {
+    "QLD":  "나스닥100 지수 2배",
+    "TQQQ": "나스닥100 지수 3배",
+    "USD":  "미국 반도체 지수 2배",
+    "SOXL": "미국 반도체 지수 3배",
+    "KORU": "한국 증시(MSCI 코리아) 3배",
+    "DGRO": "미국 배당성장주 (레버리지 없음)",
+    "SPCX": "스페이스X 주식 (레버리지 없음)",
+}
+
 MY_TICKERS = {
     "QLD":  "QLD",
     "TQQQ": "TQQQ",
@@ -584,14 +596,32 @@ def gemini_reasons(rows, headlines):
 
 
 def gemini_summary(raw_text):
-    prompt = f"""아래는 오늘자 미국 경제 데이터입니다.
-이 데이터만 근거로 4~5줄의 한국어 브리핑 요약을 작성하세요.
+    holdings = "\n".join(f"- {tk}: {desc}" for tk, desc in TICKER_DETAIL.items())
 
-규칙:
+    prompt = f"""아래는 오늘자 미국 경제 브리핑 데이터입니다.
+이 데이터만 근거로 두 부분을 작성하세요.
+
+[1부] 시장 흐름
+- 불릿 3개. 오늘 가장 중요한 것만 고를 것
+- 지수 흐름, 반도체 동향, 연준·정책, 주목할 뉴스 중에서 선택
+
+[2부] 내 종목과의 관계
+- 불릿 2~3개. 보유 종목이 오늘 뉴스·지수와 어떻게 연결되는지 설명
+- 그 종목이 무엇을 몇 배로 추종하는지와, 오늘 어떤 뉴스·지수가 그것을 움직였는지를 연결할 것
+- 이미 표에 있는 짧은 사유를 되풀이하지 말고 "왜 그렇게 되는지" 관계를 설명할 것
+- 움직임이 큰 종목 위주로 고르고, 설명할 근거가 없는 종목은 빼도 된다
+
+공통 규칙:
+- 두 부분 사이에 --- 만 있는 줄 하나를 넣어 구분할 것
+- 각 불릿은 "• " 로 시작, 한 줄 40자 이내
+- 눈으로 잡을 지점은 **굵게** 표시. 종목명, 수치, 핵심어.
+  한 줄에 1~2곳만. 남발하면 강조가 아니게 된다
+- ** 외의 마크다운 기호는 쓰지 말 것
 - 데이터에 없는 내용은 절대 추측하지 말 것
-- 마크다운 기호 사용 금지
 - 존댓말, 간결한 문장
-- 지수 흐름, 반도체 관련 동향, 연준·정책 발표, 주목할 뉴스 위주
+
+[보유 종목이 추종하는 것]
+{holdings}
 
 [데이터]
 {raw_text}
@@ -615,6 +645,29 @@ def send_telegram(text, parse_mode=None):
 
 
 # ==================== 조립 ====================
+BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.S)
+
+
+def rich(text, as_html):
+    """**강조** 마커를 처리한다.
+
+    HTML에서는 반드시 이스케이프를 먼저 하고 그 다음에 태그를 넣는다.
+    순서가 뒤집히면 모델이 뱉은 <script> 같은 것이 태그로 살아난다.
+    """
+    if not as_html:
+        return BOLD_RE.sub(r"\1", text)
+    return BOLD_RE.sub(r"<b>\1</b>", html.escape(text, quote=False))
+
+
+def split_summary(text):
+    """모델이 --- 로 나눠 보낸 두 부분을 가른다. 실패하면 전부 요약으로."""
+    parts = re.split(r"\n\s*-{3,}\s*\n", text.strip(), maxsplit=1)
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    print("[요약] 구분선을 못 찾아 전체를 요약으로 처리")
+    return text.strip(), ""
+
+
 def news_line(item, as_html):
     """제목을 기사 링크로 감싸고 뒤에 매체명을 붙인다."""
     title = item.get("title_kr") or item["title"]
@@ -641,7 +694,10 @@ def compose(as_html, summary, market, holdings, indicators, fed, news, kr_news,
     parts = [f"📊 미국 경제 브리핑 | {esc(today)}"]
 
     if summary:
-        parts.append("📝 요약\n" + esc(summary))
+        overview, impact = split_summary(summary)
+        parts.append("📝 요약\n" + rich(overview, as_html))
+        if impact:
+            parts.append("📌 내 종목과의 관계\n" + rich(impact, as_html))
 
     parts.append("📈 시장 동향\n" +
                  ("\n".join(esc(l) for l in market) if market else "조회 실패"))
