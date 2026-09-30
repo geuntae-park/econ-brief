@@ -463,7 +463,23 @@ def _is_transient(err):
     return any(k in text for k in GEMINI_TRANSIENT)
 
 
-def _gemini_call(prompt, tries=4):
+def _is_daily_quota(err):
+    """무료 티어는 모델당 하루 20회다. 이건 기다려도 그날 안에는 안 풀린다.
+
+    같은 429라도 분당 제한은 잠시 뒤 풀리지만 하루 한도는 아니다.
+    구분하지 않고 재시도하면 남은 호출까지 헛되이 태운다.
+    """
+    text = str(err)
+    return "PerDay" in text or "RequestsPerDay" in text
+
+
+def _gemini_call(prompt, tries=3):
+    """재시도 횟수는 하루 예산(모델당 20회)을 고려해 정한다.
+
+    브리핑 한 번에 번역·사유·요약 3회를 쓰는데, 재시도까지 세면
+    혼잡한 날 한 번에 하루치를 다 태울 수 있다. 그래서 모델당 3회까지만 하고
+    하루 한도 초과는 아예 재시도하지 않는다.
+    """
     client = _gemini_client()
     if client is None:
         return ""
@@ -480,6 +496,9 @@ def _gemini_call(prompt, tries=4):
                 print(f"[{model}] 시도 {attempt + 1}: 빈 응답")
             except Exception as e:
                 print(f"[{model}] 시도 {attempt + 1} 실패: {e}")
+                if _is_daily_quota(e):
+                    print(f"[{model}] 하루 한도 소진. 재시도해도 소용없으니 넘어감")
+                    break
                 if not _is_transient(e):
                     print(f"[{model}] 일시 오류가 아니므로 다음 모델로 넘어감")
                     break
@@ -756,6 +775,11 @@ def compose(as_html, summary, market, holdings, indicators, fed, news, kr_news,
         parts.append("📝 요약\n" + rich(overview, as_html))
         if impact:
             parts.append("📌 뉴스와 내 종목\n" + rich(impact, as_html))
+    elif as_html:
+        # 요약을 못 만들면 섹션이 통째로 빠져 윗부분이 비어 보인다.
+        # 왜 없는지 한 줄이라도 남긴다.
+        parts.append("📝 요약\n오늘은 요약을 만들지 못했습니다. "
+                     "아래 수치와 뉴스를 참고해 주세요.")
 
     parts.append("📈 시장 동향\n" +
                  ("\n".join(esc(l) for l in market) if market else "조회 실패"))
