@@ -605,11 +605,15 @@ def gemini_summary(raw_text):
 - 불릿 3개. 오늘 가장 중요한 것만 고를 것
 - 지수 흐름, 반도체 동향, 연준·정책, 주목할 뉴스 중에서 선택
 
-[2부] 내 종목과의 관계
-- 불릿 2~3개. 보유 종목이 오늘 뉴스·지수와 어떻게 연결되는지 설명
-- 그 종목이 무엇을 몇 배로 추종하는지와, 오늘 어떤 뉴스·지수가 그것을 움직였는지를 연결할 것
-- 이미 표에 있는 짧은 사유를 되풀이하지 말고 "왜 그렇게 되는지" 관계를 설명할 것
-- 움직임이 큰 종목 위주로 고르고, 설명할 근거가 없는 종목은 빼도 된다
+[2부] 뉴스와 내 종목
+- 오늘 뉴스 중에서 보유 종목과 실제로 연결되는 것만 골라 불릿 2~3개
+- 뉴스에서 출발할 것. "어떤 뉴스 → 어느 종목에 어떤 영향" 형태로 쓸 것
+  (예: 반도체 수요 회복 소식 → 반도체 지수를 3배로 따라가는 SOXL에 직접 영향)
+- 종목의 등락률을 되풀이하지 말 것. 숫자는 이미 표에 있다.
+  여기는 그 뉴스가 왜 그 종목과 상관있는지를 짚는 자리다
+- 보유 종목과 무관한 뉴스는 빼고, 억지로 연결하지 말 것
+- 연결되는 뉴스가 하나도 없으면 "오늘 뉴스 중 보유 종목과 직접 연결되는 소식은
+  없습니다" 한 줄만 쓸 것
 
 공통 규칙:
 - 두 부분 사이에 --- 만 있는 줄 하나를 넣어 구분할 것
@@ -697,7 +701,7 @@ def compose(as_html, summary, market, holdings, indicators, fed, news, kr_news,
         overview, impact = split_summary(summary)
         parts.append("📝 요약\n" + rich(overview, as_html))
         if impact:
-            parts.append("📌 내 종목과의 관계\n" + rich(impact, as_html))
+            parts.append("📌 뉴스와 내 종목\n" + rich(impact, as_html))
 
     parts.append("📈 시장 동향\n" +
                  ("\n".join(esc(l) for l in market) if market else "조회 실패"))
