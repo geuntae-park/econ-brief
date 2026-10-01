@@ -473,12 +473,15 @@ def _is_daily_quota(err):
     return "PerDay" in text or "RequestsPerDay" in text
 
 
-def _gemini_call(prompt, tries=3):
-    """재시도 횟수는 하루 예산(모델당 20회)을 고려해 정한다.
+def _gemini_call(prompt, tries=5):
+    """재시도 횟수는 하루 예산(모델당 20회)을 보고 정한다.
 
-    브리핑 한 번에 번역·사유·요약 3회를 쓰는데, 재시도까지 세면
-    혼잡한 날 한 번에 하루치를 다 태울 수 있다. 그래서 모델당 3회까지만 하고
-    하루 한도 초과는 아예 재시도하지 않는다.
+    브리핑 한 번에 번역·사유·요약 3회를 쓰므로, 모든 시도가 실패해도
+    모델당 3 x 5 = 15회로 한도 안쪽이다. 09-30에 쿼터가 터진 것은
+    수동 실행을 네 번 돌렸기 때문이지 재시도 때문이 아니었다.
+    정작 아침 혼잡 구간에서는 3회로 줄였더니 실패가 늘었다.
+
+    진짜 위험한 하루 한도 초과는 아래에서 재시도 없이 빠져나간다.
     """
     client = _gemini_client()
     if client is None:
@@ -680,6 +683,8 @@ def gemini_summary(raw_text, extra=""):
 공통 규칙:
 - 두 부분 사이에 --- 만 있는 줄 하나를 넣어 구분할 것
 - 각 불릿은 "• " 로 시작, 한 줄 40자 이내
+- 1부의 각 불릿에는 등락률이나 지수 값 같은 구체적인 수치를 하나 이상 넣을 것
+  ("반도체 지수가 상승했습니다"가 아니라 "반도체 지수 +1.3%" 처럼)
 - 눈으로 잡을 지점은 **굵게** 표시. 종목명, 수치, 핵심어.
   한 줄에 1~2곳만. 남발하면 강조가 아니게 된다
 - ** 외의 마크다운 기호는 쓰지 말 것
@@ -736,13 +741,22 @@ def rich(text, as_html):
     return BOLD_RE.sub(lambda m: emphasize(m.group(1)), escaped)
 
 
+# 프롬프트에 쓴 "[1부] 시장 흐름" 같은 머리말을 모델이 그대로 따라 쓴다.
+# compose가 섹션 제목을 따로 붙이므로 그대로 두면 제목이 두 줄로 겹친다.
+PART_LABEL_RE = re.compile(r"^\s*\[\s*\d\s*부\s*\][^\n]*\n?")
+
+
+def drop_part_label(text):
+    return PART_LABEL_RE.sub("", text.strip()).strip()
+
+
 def split_summary(text):
     """모델이 --- 로 나눠 보낸 두 부분을 가른다. 실패하면 전부 요약으로."""
     parts = re.split(r"\n\s*-{3,}\s*\n", text.strip(), maxsplit=1)
     if len(parts) == 2:
-        return parts[0].strip(), parts[1].strip()
+        return drop_part_label(parts[0]), drop_part_label(parts[1])
     print("[요약] 구분선을 못 찾아 전체를 요약으로 처리")
-    return text.strip(), ""
+    return drop_part_label(text), ""
 
 
 def news_line(item, as_html):
