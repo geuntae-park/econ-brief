@@ -2,8 +2,10 @@ name: Daily Econ Brief
 
 on:
   schedule:
-    # UTC 22:30 = 한국시간 07:30 (일~목 UTC = 월~금 KST)
-    - cron: '30 22 * * 0-4'
+    # UTC 22:02 = 한국시간 07:02 (일~목 UTC = 월~금 KST)
+    # 큐 대기가 보통 8분쯤이라 07:10 도착을 노린다.
+    # :00 이나 :30 은 예약이 몰려 더 밀리므로 일부러 어중간한 분으로 잡았다.
+    - cron: '2 22 * * 0-4'
   workflow_dispatch:   # 수동 실행 버튼
 
 jobs:
