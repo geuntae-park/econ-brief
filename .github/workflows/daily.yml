@@ -1,12 +1,12 @@
 name: Daily Econ Brief
 
+# GitHub의 schedule 이벤트는 공용 큐를 타는데 2026-10-06부터 매일 3~4시간씩
+# 밀려 10~11시에 도착했다. cron 분을 옮겨도 소용이 없었다.
+# workflow_dispatch는 6회 모두 대기 0초에 시작하므로, 외부 크론
+# (cron-job.org, 월~금 07:08 KST)이 dispatch API를 호출하는 방식으로 바꿨다.
+# 여기에 schedule을 남겨두면 하루 두 번 발송되므로 제거했다.
 on:
-  schedule:
-    # UTC 22:02 = 한국시간 07:02 (일~목 UTC = 월~금 KST)
-    # 큐 대기가 보통 8분쯤이라 07:10 도착을 노린다.
-    # :00 이나 :30 은 예약이 몰려 더 밀리므로 일부러 어중간한 분으로 잡았다.
-    - cron: '2 22 * * 0-4'
-  workflow_dispatch:   # 수동 실행 버튼
+  workflow_dispatch:
 
 jobs:
   brief:
