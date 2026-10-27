@@ -138,7 +138,7 @@ WATCH_RELEASES = {
 WEEKDAY_KR = ("월", "화", "수", "목", "금", "토", "일")
 
 
-def build_calendar(days=7, limit=4):
+def build_calendar(days=14, limit=4):
     """앞으로 며칠 안에 나올 주요 발표. 브리핑이 지난 일만 다루지 않게 한다.
 
     FRED 키가 없거나 응답이 달라지면 빈 목록을 돌려 섹션을 생략한다.
