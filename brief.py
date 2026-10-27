@@ -5,7 +5,7 @@ import time
 import calendar
 import requests
 import feedparser
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 FRED_API_KEY = os.environ["FRED_API_KEY"]
@@ -17,14 +17,16 @@ today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y년 %m월 %d일")
 
 
 # ==================== FRED 지표 ====================
+# 세 번째 값은 갱신 주기. 월간 지표는 발표 후 한 달 내내 같은 값이 나오므로
+# 언제 것인지 적어주지 않으면 매일 바뀌는 숫자처럼 보인다.
 FRED_SERIES = {
-    "CPIAUCSL": ("CPI(전년比)", "yoy"),
-    "UNRATE":   ("실업률", "pct"),
-    "FEDFUNDS": ("연방기금금리", "pct"),
-    "DGS10":    ("10년물 국채", "pct"),
-    "DGS2":     ("2년물 국채", "pct"),
-    "DTWEXBGS": ("달러인덱스", "raw"),
-    "PAYEMS":   ("비농업고용(전월比)", "diff_k"),
+    "CPIAUCSL": ("CPI(전년比)", "yoy", "M"),
+    "UNRATE":   ("실업률", "pct", "M"),
+    "FEDFUNDS": ("연방기금금리", "pct", "M"),
+    "DGS10":    ("10년물 국채", "pct", "D"),
+    "DGS2":     ("2년물 국채", "pct", "D"),
+    "DTWEXBGS": ("달러인덱스", "raw", "D"),
+    "PAYEMS":   ("비농업고용(전월比)", "diff_k", "M"),
 }
 
 
@@ -64,15 +66,24 @@ def arrow(diff):
     return "⚪"
 
 
+def month_tag(date_str):
+    """관측 기준월. FRED의 date는 발표일이 아니라 통계 기준 시점이다."""
+    try:
+        return f"{int(date_str[5:7])}월"
+    except (ValueError, IndexError):
+        return date_str
+
+
 def build_indicators():
-    lines = []
-    for sid, (label, mode) in FRED_SERIES.items():
+    daily, monthly = [], []
+    for sid, (label, mode, freq) in FRED_SERIES.items():
         try:
             obs = fred_fetch(sid)
             if not obs:
                 continue
             latest = float(obs[0]["value"])
             date = obs[0]["date"]
+            tag = month_tag(date)
 
             if mode == "yoy":
                 if len(obs) < 13:
@@ -82,24 +93,94 @@ def build_indicators():
                     prev_yoy = (float(obs[1]["value"]) / float(obs[13]["value"]) - 1) * 100
                     mark = arrow(yoy - prev_yoy)
                 else:
-                    mark = "➖"
-                lines.append(f"{mark} {label}  {yoy:.1f}%  ({date})")
+                    mark = "⚪"
+                line = f"{mark} {label}  {yoy:.1f}%  ({tag})"
             elif mode == "pct":
                 prev = float(obs[1]["value"]) if len(obs) > 1 else latest
                 diff = latest - prev
-                lines.append(f"{arrow(diff)} {label}  {latest:.2f}%  ({diff:+.2f})")
+                note = tag if freq == "M" else f"{diff:+.2f}"
+                line = f"{arrow(diff)} {label}  {latest:.2f}%  ({note})"
             elif mode == "diff_k":
                 prev = float(obs[1]["value"]) if len(obs) > 1 else latest
                 diff = latest - prev
-                lines.append(f"{arrow(diff)} {label}  {diff:+,.0f}천명  ({date})")
+                line = f"{arrow(diff)} {label}  {diff:+,.0f}천명  ({tag})"
             else:
                 prev = float(obs[1]["value"]) if len(obs) > 1 else latest
                 diff = latest - prev
-                lines.append(f"{arrow(diff)} {label}  {latest:.2f}  ({diff:+.2f})")
+                note = tag if freq == "M" else f"{diff:+.2f}"
+                line = f"{arrow(diff)} {label}  {latest:.2f}  ({note})"
+
+            (monthly if freq == "M" else daily).append(line)
         except Exception as e:
             print(f"FRED 실패 {sid}: {e}")
-            lines.append(f"⚠️ {label}  조회실패")
+            daily.append(f"⚠️ {label}  조회실패")
+
+    lines = list(daily)
+    if monthly:
+        # 매일 바뀌는 것과 한 달에 한 번 바뀌는 것을 섞어두면 오해를 부른다
+        lines.append("· 월간 지표 (괄호는 통계 기준월)")
+        lines.extend(monthly)
     return lines
+
+
+# FRED가 주는 발표 일정 중 쓸 만한 것만 고른다.
+# 전체를 받으면 아무도 안 보는 통계까지 수백 건이 딸려온다.
+WATCH_RELEASES = {
+    "Consumer Price Index": "소비자물가 CPI",
+    "Producer Price Index": "생산자물가 PPI",
+    "Employment Situation": "고용보고서",
+    "Personal Income and Outlays": "개인소비지출 PCE",
+    "Gross Domestic Product": "GDP",
+    "Advance Monthly Sales for Retail Trade": "소매판매",
+    "Job Openings and Labor Turnover Survey": "구인이직 JOLTS",
+}
+
+WEEKDAY_KR = ("월", "화", "수", "목", "금", "토", "일")
+
+
+def build_calendar(days=7, limit=4):
+    """앞으로 며칠 안에 나올 주요 발표. 브리핑이 지난 일만 다루지 않게 한다.
+
+    FRED 키가 없거나 응답이 달라지면 빈 목록을 돌려 섹션을 생략한다.
+    """
+    today_utc = datetime.now(timezone.utc).date()
+    params = {
+        "api_key": FRED_API_KEY,
+        "file_type": "json",
+        "realtime_start": today_utc.isoformat(),
+        "realtime_end": (today_utc + timedelta(days=days)).isoformat(),
+        "include_release_dates_with_no_data": "true",
+        "sort_order": "asc",
+        "limit": 1000,
+    }
+    try:
+        data = get_json("https://api.stlouisfed.org/fred/releases/dates", params=params)
+    except Exception as e:
+        print(f"발표 일정 조회 실패: {e}")
+        return []
+
+    rows = data.get("release_dates", [])
+    print(f"[발표일정] 전체 {len(rows)}건 수신")
+
+    seen, out = set(), []
+    for r in rows:
+        name = r.get("release_name", "")
+        label = next((v for k, v in WATCH_RELEASES.items() if k in name), None)
+        if not label or label in seen:
+            continue
+        try:
+            d = datetime.strptime(r["date"], "%Y-%m-%d").date()
+        except (KeyError, ValueError):
+            continue
+        if d < today_utc:
+            continue
+        seen.add(label)
+        out.append(f"{d.month}/{d.day}({WEEKDAY_KR[d.weekday()]}) {label}")
+        if len(out) >= limit:
+            break
+
+    print(f"[발표일정] 추린 것 {len(out)}건: {', '.join(out) if out else '없음'}")
+    return out
 
 
 # ==================== 시장 지수 / 관심 종목 ====================
@@ -683,6 +764,8 @@ def gemini_summary(raw_text, extra=""):
 공통 규칙:
 - 두 부분 사이에 --- 만 있는 줄 하나를 넣어 구분할 것
 - 각 불릿은 "• " 로 시작, 한 줄 40자 이내
+- 데이터에 "다가오는 발표"가 있으면 1부 마지막 불릿에서 한 번 짚을 것
+  (예: 오늘 밤 소비자물가 CPI 발표 예정)
 - 1부의 각 불릿에는 등락률이나 지수 값 같은 구체적인 수치를 하나 이상 넣을 것
   ("반도체 지수가 상승했습니다"가 아니라 "반도체 지수 +1.3%" 처럼)
 - 눈으로 잡을 지점은 **굵게** 표시. 종목명, 수치, 핵심어.
@@ -778,7 +861,7 @@ def news_line(item, as_html):
 
 
 def compose(as_html, summary, market, holdings, indicators, fed, news, kr_news,
-            translated_ok=True):
+            calendar_items=(), translated_ok=True):
     """같은 내용을 평문(Gemini 입력용)과 HTML(발송용) 두 벌로 만든다."""
     # 따옴표까지 바꾸면 &#x27; 이 그대로 노출될 수 있어 태그 문자만 이스케이프한다
     esc = (lambda t: html.escape(t, quote=False)) if as_html else (lambda t: t)
@@ -808,6 +891,10 @@ def compose(as_html, summary, market, holdings, indicators, fed, news, kr_news,
     parts.append("📉 주요 지표\n" +
                  ("\n".join(esc(l) for l in indicators) if indicators else "조회 실패"))
 
+    if calendar_items:
+        parts.append("🗓️ 다가오는 발표\n" +
+                     "\n".join(f"• {esc(c)}" for c in calendar_items))
+
     # 번역이 실패하면 영문 제목이 그대로 나간다. 왜 영문인지 알 수 있게 표시한다.
     mark = "" if translated_ok else " (번역 실패)"
 
@@ -828,6 +915,7 @@ def main():
     market_rows = fetch_quotes(YAHOO_TICKERS)
     holding_rows = fetch_quotes(MY_TICKERS)
     indicators = build_indicators()
+    calendar_items = build_calendar()
     news = build_news()
     fed = build_fed()
     kr_news = build_kr_news()
@@ -846,7 +934,7 @@ def main():
     market = format_quotes(market_rows)
     holdings = format_quotes(holding_rows, reasons, align=True)
 
-    sections = (market, holdings, indicators, fed, news, kr_news)
+    sections = (market, holdings, indicators, fed, news, kr_news, calendar_items)
     time.sleep(GEMINI_GAP)
     summary = gemini_summary(compose(False, None, *sections,
                                      translated_ok=translated_ok),
